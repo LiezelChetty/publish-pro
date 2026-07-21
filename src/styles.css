@@ -243,6 +243,8 @@ button {
 }
 
 .editor {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-rows: 56px auto minmax(0, 1fr);
   min-width: 0;
@@ -450,6 +452,14 @@ button {
   pointer-events: none;
 }
 
+.shape-placement-preview {
+  position: absolute;
+  z-index: 4;
+  border: 1px dashed #d8342a;
+  background: rgb(216 52 42 / 0.06);
+  pointer-events: none;
+}
+
 .blank-page {
   display: grid;
   place-content: center;
@@ -576,6 +586,49 @@ button {
   background: transparent;
 }
 
+.mark-shape {
+  overflow: visible;
+  background: transparent;
+}
+
+.shape-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.callout-svg {
+  width: max(100%, 180px);
+  height: max(100%, 160px);
+}
+
+.callout-text {
+  position: absolute;
+  inset: 8px;
+  overflow: hidden;
+  color: #172033;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+
+.leader-handle {
+  position: absolute;
+  z-index: 3;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #d8342a;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 0.3);
+  cursor: crosshair;
+}
+
 .mark-comment {
   z-index: 3;
   display: grid;
@@ -679,6 +732,8 @@ button {
 }
 
 .inspector {
+  position: relative;
+  z-index: 2;
   overflow: auto;
   border-right: 0;
   border-left: 1px solid #d8dde7;

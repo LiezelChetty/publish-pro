@@ -4,13 +4,17 @@ import {
   FilePlus2,
   Highlighter,
   Image as ImageIcon,
+  Circle,
+  CornerUpRight,
   MessageSquare,
+  Minus,
   MousePointer2,
   PenLine,
   Pencil,
   Plus,
   Redo2,
   Search,
+  Square,
   Stamp,
   Strikethrough,
   TextCursorInput,
@@ -64,11 +68,21 @@ import {
   type TextBoxPreset,
   type TextBoxStyle,
 } from "./textBoxes";
+import {
+  createShapeStyle,
+  getDashArray,
+  getPdfDashArray,
+  shapeDashStyles,
+  shapeToolLabels,
+  type ShapeKind,
+  type ShapeStyle,
+} from "./shapes";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | TextMarkupKind;
-type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | "comment" | TextMarkupKind;
+type ShapeTool = `shape:${ShapeKind}`;
+type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | ShapeTool | TextMarkupKind;
+type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | "comment" | "shape" | TextMarkupKind;
 type WorkState = {
   message: string;
   progress?: number;
@@ -120,6 +134,7 @@ type Mark = {
   markupRects?: MarkupRect[];
   comment?: CommentData;
   textStyle?: TextBoxStyle;
+  shapeStyle?: ShapeStyle;
   strokePoints?: StrokePoint[];
   strokeOpacity?: number;
 };
@@ -248,6 +263,7 @@ export function App() {
       const isRedo = (key === "z" && event.shiftKey) || key === "y";
       const isCopy = key === "c" && !event.shiftKey && !isEditableElement(event.target);
       const isPaste = key === "v" && !event.shiftKey && !isEditableElement(event.target);
+      const isDuplicate = key === "d" && !event.shiftKey && !isEditableElement(event.target);
 
       if (isUndo && history.past.length > 0) {
         event.preventDefault();
@@ -267,6 +283,11 @@ export function App() {
       if (isPaste && copiedMark) {
         event.preventDefault();
         pasteCopiedMark();
+      }
+
+      if (isDuplicate && selected) {
+        event.preventDefault();
+        duplicateSelectedMark();
       }
     }
 
@@ -521,6 +542,7 @@ export function App() {
       return;
     }
     if (activeTool === "draw") return;
+    if (isShapeTool(activeTool)) return;
     if (isTextMarkupKind(activeTool)) return;
 
     if (activeTool === "comment") {
@@ -565,6 +587,30 @@ export function App() {
     };
 
     commitMarks([...marks, mark], mark.id);
+    setActiveTool("select");
+  }
+
+  function addShape(pageNumber: number, placement: { x: number; y: number; width?: number; height?: number }, shapeKind: ShapeKind) {
+    const isLineShape = shapeKind === "line" || shapeKind === "arrow" || shapeKind === "doubleArrow";
+    const width = Math.max(isLineShape ? 64 : 48, placement.width ?? (isLineShape ? 160 : 150));
+    const height = Math.max(isLineShape ? 8 : 36, placement.height ?? (isLineShape ? 44 : 96));
+    const mark: Mark = {
+      id: crypto.randomUUID(),
+      kind: "shape",
+      page: pageNumber,
+      x: placement.x,
+      y: placement.y,
+      width,
+      height,
+      text: shapeToolLabels[shapeKind],
+      color: "#d8342a",
+      size: 16,
+      rotation: 0,
+      opacity: 1,
+      shapeStyle: createShapeStyle(shapeKind),
+    };
+
+    commitMarks([...marks, clampMarkToPage(mark, pages)], mark.id);
     setActiveTool("select");
   }
 
@@ -696,9 +742,20 @@ export function App() {
     commitMarks(marks.filter((mark) => mark.id !== selectedMark), null);
   }
 
+  function removeMarkById(id: string) {
+    commitMarks(marks.filter((mark) => mark.id !== id), null);
+  }
+
   function duplicateSelectedMark() {
     if (!selected) return;
     const duplicate = duplicateMark(selected, currentPage);
+    commitMarks([...marks, clampMarkToPage(duplicate, pages)], duplicate.id);
+  }
+
+  function duplicateMarkById(id: string) {
+    const mark = marks.find((item) => item.id === id);
+    if (!mark) return;
+    const duplicate = duplicateMark(mark, currentPage);
     commitMarks([...marks, clampMarkToPage(duplicate, pages)], duplicate.id);
   }
 
@@ -765,6 +822,18 @@ export function App() {
       color: color ?? selected.color,
       size: size ?? selected.size,
       textStyle: { ...createDefaultTextBoxStyle(selected.textStyle), ...stylePatch },
+    });
+  }
+
+  function updateShapeStyle(id: string, patch: Partial<ShapeStyle>) {
+    const mark = marks.find((item) => item.id === id);
+    if (!mark?.shapeStyle) return;
+    updateMark(id, {
+      color: patch.strokeColor ?? mark.color,
+      shapeStyle: {
+        ...mark.shapeStyle,
+        ...patch,
+      },
     });
   }
 
@@ -941,6 +1010,20 @@ export function App() {
             width: markWidth,
             height: markHeight,
             fontSize: markSize,
+            scale: height / sourcePage.height,
+          });
+          continue;
+        }
+
+        if (mark.kind === "shape" && mark.shapeStyle) {
+          drawShapeToPdfPage({
+            page,
+            mark,
+            font: helvetica,
+            x,
+            y,
+            width: markWidth,
+            height: markHeight,
             scale: height / sourcePage.height,
           });
           continue;
@@ -1179,6 +1262,15 @@ export function App() {
             <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
             <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
             <ToolButton icon={<Highlighter />} label="Add area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+            <ToolButton icon={<Square />} label="Add rectangle" active={activeTool === "shape:rectangle"} onClick={() => setActiveTool("shape:rectangle")} disabled={isBusy} />
+            <ToolButton icon={<Circle />} label="Add ellipse" active={activeTool === "shape:ellipse"} onClick={() => setActiveTool("shape:ellipse")} disabled={isBusy} />
+            <ToolButton icon={<Minus />} label="Add line" active={activeTool === "shape:line"} onClick={() => setActiveTool("shape:line")} disabled={isBusy} />
+            <ToolButton icon={<CornerUpRight />} label="Add arrow" active={activeTool === "shape:arrow"} onClick={() => setActiveTool("shape:arrow")} disabled={isBusy} />
+            <ToolButton icon={<CornerUpRight />} label="Add double-ended arrow" active={activeTool === "shape:doubleArrow"} onClick={() => setActiveTool("shape:doubleArrow")} disabled={isBusy} />
+            <ToolButton icon={<Square />} label="Add rounded rectangle" active={activeTool === "shape:roundedRectangle"} onClick={() => setActiveTool("shape:roundedRectangle")} disabled={isBusy} />
+            <ToolButton icon={<Square />} label="Add polygon" active={activeTool === "shape:polygon"} onClick={() => setActiveTool("shape:polygon")} disabled={isBusy} />
+            <ToolButton icon={<Circle />} label="Add cloud" active={activeTool === "shape:cloud"} onClick={() => setActiveTool("shape:cloud")} disabled={isBusy} />
+            <ToolButton icon={<MessageSquare />} label="Add text callout" active={activeTool === "shape:callout"} onClick={() => setActiveTool("shape:callout")} disabled={isBusy} />
             <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
             <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
             <ToolButton
@@ -1252,6 +1344,7 @@ export function App() {
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
                   onAddTextBox={addTextBox}
+                  onAddShape={addShape}
                   onAddStroke={addStroke}
                   onAddTextMarkup={addTextMarkup}
                   onPlaceSignature={placeSignature}
@@ -1694,6 +1787,174 @@ export function App() {
                 </button>
               </div>
             </div>
+          ) : selected?.kind === "shape" && selected.shapeStyle ? (
+            <div className="control-stack shape-controls">
+              <div className="comment-status">
+                <Square size={16} aria-hidden="true" />
+                <span>{shapeToolLabels[selected.shapeStyle.shapeKind]}</span>
+              </div>
+              {selected.shapeStyle.shapeKind === "callout" ? (
+                <label>
+                  Callout text
+                  <textarea
+                    value={selected.shapeStyle.calloutText}
+                    onChange={(event) => updateShapeStyle(selected.id, { calloutText: event.currentTarget.value })}
+                    aria-label="Callout text"
+                  />
+                </label>
+              ) : null}
+              <label>
+                Stroke colour
+                <input type="color" value={selected.shapeStyle.strokeColor} onChange={(event) => updateShapeStyle(selected.id, { strokeColor: event.currentTarget.value })} aria-label="Shape stroke colour" />
+              </label>
+              <label>
+                Fill colour
+                <input type="color" value={selected.shapeStyle.fillColor} onChange={(event) => updateShapeStyle(selected.id, { fillColor: event.currentTarget.value })} aria-label="Shape fill colour" />
+              </label>
+              <div className="dimension-grid">
+                <label>
+                  Stroke width
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="24"
+                    step="0.5"
+                    value={selected.shapeStyle.strokeWidth}
+                    onChange={(event) => updateShapeStyle(selected.id, { strokeWidth: clamp(Number(event.currentTarget.value), 0.5, 24) })}
+                    aria-label="Shape stroke width"
+                  />
+                </label>
+                <label>
+                  Rotation
+                  <input
+                    type="number"
+                    min="-180"
+                    max="180"
+                    value={Math.round(selected.rotation)}
+                    onChange={(event) => updateMark(selected.id, { rotation: Number(event.currentTarget.value) })}
+                    aria-label="Shape rotation degrees"
+                  />
+                </label>
+              </div>
+              <div className="dimension-grid">
+                <label>
+                  Stroke opacity
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={selected.shapeStyle.strokeOpacity}
+                    onChange={(event) => updateShapeStyle(selected.id, { strokeOpacity: clamp(Number(event.currentTarget.value), 0, 1) })}
+                    aria-label="Shape stroke opacity"
+                  />
+                </label>
+                <label>
+                  Fill opacity
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={selected.shapeStyle.fillOpacity}
+                    onChange={(event) => updateShapeStyle(selected.id, { fillOpacity: clamp(Number(event.currentTarget.value), 0, 1) })}
+                    aria-label="Shape fill opacity"
+                  />
+                </label>
+              </div>
+              <label>
+                Dash style
+                <select
+                  value={selected.shapeStyle.dashStyle}
+                  onChange={(event) => updateShapeStyle(selected.id, { dashStyle: event.currentTarget.value as ShapeStyle["dashStyle"] })}
+                  aria-label="Shape dash style"
+                >
+                  {shapeDashStyles.map((style) => (
+                    <option key={style} value={style}>
+                      {style}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selected.shapeStyle.shapeKind === "line" || selected.shapeStyle.shapeKind === "arrow" || selected.shapeStyle.shapeKind === "doubleArrow" ? (
+                <div className="dimension-grid">
+                  <label>
+                    Start arrow
+                    <select
+                      value={selected.shapeStyle.startArrowhead}
+                      onChange={(event) => updateShapeStyle(selected.id, { startArrowhead: event.currentTarget.value as ShapeStyle["startArrowhead"] })}
+                      aria-label="Shape start arrowhead"
+                    >
+                      <option value="none">none</option>
+                      <option value="arrow">arrow</option>
+                    </select>
+                  </label>
+                  <label>
+                    End arrow
+                    <select
+                      value={selected.shapeStyle.endArrowhead}
+                      onChange={(event) => updateShapeStyle(selected.id, { endArrowhead: event.currentTarget.value as ShapeStyle["endArrowhead"] })}
+                      aria-label="Shape end arrowhead"
+                    >
+                      <option value="none">none</option>
+                      <option value="arrow">arrow</option>
+                    </select>
+                  </label>
+                </div>
+              ) : null}
+              <div className="dimension-grid">
+                <label>
+                  W
+                  <input
+                    type="number"
+                    value={Math.round(selected.width)}
+                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "width", Number(event.currentTarget.value)))}
+                    aria-label="Shape width"
+                  />
+                </label>
+                <label>
+                  H
+                  <input
+                    type="number"
+                    value={Math.round(selected.height)}
+                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "height", Number(event.currentTarget.value)))}
+                    aria-label="Shape height"
+                  />
+                </label>
+              </div>
+              <div className="inspector-actions">
+                <button
+                  className="button ghost"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    duplicateMarkById(selected.id);
+                  }}
+                  onClick={(event) => {
+                    if (event.detail === 0) duplicateMarkById(selected.id);
+                  }}
+                  title="Duplicate shape"
+                  aria-label="Duplicate shape"
+                >
+                  Duplicate
+                </button>
+                <button
+                  className="button ghost"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    removeMarkById(selected.id);
+                  }}
+                  onClick={(event) => {
+                    if (event.detail === 0) removeMarkById(selected.id);
+                  }}
+                  title="Delete shape"
+                  aria-label="Delete shape"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
           ) : selected ? (
             <div className="control-stack">
               {!isTextMarkupKind(selected.kind) ? (
@@ -2002,6 +2263,7 @@ function DocumentPage({
   onSelect,
   onAddMark,
   onAddTextBox,
+  onAddShape,
   onAddStroke,
   onAddTextMarkup,
   onPlaceSignature,
@@ -2025,6 +2287,7 @@ function DocumentPage({
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
   onAddTextBox: (page: number, x: number, y: number, width?: number, height?: number) => void;
+  onAddShape: (page: number, placement: { x: number; y: number; width?: number; height?: number }, shapeKind: ShapeKind) => void;
   onAddStroke: (page: number, points: StrokePoint[]) => void;
   onAddTextMarkup: (page: number, rects: MarkupRect[]) => void;
   onPlaceSignature: (page: number, x: number, y: number, width?: number, height?: number) => void;
@@ -2043,13 +2306,14 @@ function DocumentPage({
     latest: Mark;
     startX: number;
     startY: number;
-    mode: "move" | "resize";
+    mode: "move" | "resize" | "leader";
     corner?: "nw" | "ne" | "sw" | "se";
   } | null>(null);
   const [draftStroke, setDraftStroke] = useState<StrokePoint[]>([]);
   const [draftSignature, setDraftSignature] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
   const [draftTextSelection, setDraftTextSelection] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
   const [draftTextBox, setDraftTextBox] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
+  const [draftShape, setDraftShape] = useState<{ start: StrokePoint; current: StrokePoint; shapeKind: ShapeKind } | null>(null);
   const activeDraftStroke = Array.isArray(draftStroke) ? draftStroke : [];
 
   useEffect(() => {
@@ -2133,6 +2397,12 @@ function DocumentPage({
           setDraftTextBox({ start: point, current: point });
           return;
         }
+        if (isShapeTool(activeTool)) {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          onSelect(null);
+          setDraftShape({ start: point, current: point, shapeKind: getShapeKindFromTool(activeTool) });
+          return;
+        }
         if (activeTool === "pngSignature") {
           if (!pendingSignature) {
             onAddMark(page.pageNumber, point.x, point.y);
@@ -2163,6 +2433,10 @@ function DocumentPage({
               setDraftTextBox((existing) => (existing ? { ...existing, current: pagePoint(event) } : existing));
               return;
             }
+            if (draftShape) {
+              setDraftShape((existing) => (existing ? { ...existing, current: pagePoint(event) } : existing));
+              return;
+            }
             const drag = dragRef.current;
             if (!drag) return;
             const activeMark = marks.find((mark) => mark.id === drag.before.id);
@@ -2170,7 +2444,9 @@ function DocumentPage({
             const dx = (event.clientX - drag.startX) / zoom;
             const dy = (event.clientY - drag.startY) / zoom;
             const latest =
-              drag.mode === "resize" && drag.corner
+              drag.mode === "leader"
+                ? moveCalloutLeaderBy(drag.before, dx, dy, [page])
+                : drag.mode === "resize" && drag.corner
                 ? resizeMarkFromCorner(drag.before, drag.corner, dx, dy, [page])
                 : moveMarkBy(drag.before, dx, dy, [page]);
             dragRef.current = { ...drag, latest };
@@ -2202,6 +2478,13 @@ function DocumentPage({
           onAddTextBox(page.pageNumber, placement.x, placement.y, placement.width, placement.height);
           return;
         }
+        if (draftShape) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+          const placement = getDraftTextBoxPlacement(draftShape.start, pagePoint(event));
+          setDraftShape(null);
+          onAddShape(page.pageNumber, placement, draftShape.shapeKind);
+          return;
+        }
         if (draftSignature && pendingSignature) {
           event.currentTarget.releasePointerCapture(event.pointerId);
           const placement = getSignaturePlacement(draftSignature.start, pagePoint(event), pendingSignature);
@@ -2219,6 +2502,7 @@ function DocumentPage({
         if (activeDraftStroke.length > 0) return;
         if (draftTextSelection) return;
         if (draftTextBox) return;
+        if (draftShape) return;
         const drag = dragRef.current;
         dragRef.current = null;
         if (drag && !areMarksEqual([drag.before], [drag.latest])) {
@@ -2278,6 +2562,9 @@ function DocumentPage({
       ) : null}
       {draftTextBox ? (
         <div className="text-box-placement-preview" aria-hidden="true" style={getDraftSelectionStyle(draftTextBox.start, draftTextBox.current, zoom)} />
+      ) : null}
+      {draftShape ? (
+        <div className="shape-placement-preview" aria-hidden="true" style={getDraftSelectionStyle(draftShape.start, draftShape.current, zoom)} />
       ) : null}
       {marks.map((mark) => (
         <div
@@ -2358,6 +2645,7 @@ function DocumentPage({
               </div>
             )
           ) : null}
+          {mark.kind === "shape" && mark.shapeStyle ? <ShapePreview mark={mark} zoom={zoom} /> : null}
           {isTextMarkupKind(mark.kind) && mark.markupRects ? (
             <svg className="markup-mark-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
               {mark.markupRects.map((rect, index) => {
@@ -2425,7 +2713,28 @@ function DocumentPage({
           !isTextMarkupKind(mark.kind)
             ? mark.text
             : ""}
-          {((mark.kind === "image" || mark.kind === "pngSignature" || mark.kind === "text") && selectedMark === mark.id && editingText?.id !== mark.id)
+          {mark.kind === "shape" && mark.shapeStyle?.shapeKind === "callout" && selectedMark === mark.id ? (
+            <span
+              className="leader-handle"
+              aria-hidden="true"
+              style={{
+                left: (mark.shapeStyle.leaderEnd?.x ?? mark.width / 2) * zoom - 5,
+                top: (mark.shapeStyle.leaderEnd?.y ?? mark.height + 48) * zoom - 5,
+              }}
+              onPointerDown={(event) => {
+                event.stopPropagation();
+                onSelect(mark.id);
+                dragRef.current = {
+                  before: mark,
+                  latest: mark,
+                  startX: event.clientX,
+                  startY: event.clientY,
+                  mode: "leader",
+                };
+              }}
+            />
+          ) : null}
+          {((mark.kind === "image" || mark.kind === "pngSignature" || mark.kind === "text" || mark.kind === "shape") && selectedMark === mark.id && editingText?.id !== mark.id)
             ? (["nw", "ne", "sw", "se"] as const).map((corner) => (
                 <span
                   className={`resize-handle handle-${corner}`}
@@ -2459,6 +2768,113 @@ function BlankPage() {
       <FilePlus2 size={34} aria-hidden="true" />
       <span>New PDF page</span>
     </div>
+  );
+}
+
+function ShapePreview({ mark, zoom }: { mark: Mark; zoom: number }) {
+  const style = mark.shapeStyle;
+  if (!style) return null;
+  const strokeWidth = Math.max(1, style.strokeWidth * zoom);
+  const dashArray = getDashArray(style.dashStyle, strokeWidth);
+  const leaderEnd = style.leaderEnd ?? { x: mark.width / 2, y: mark.height + 48 };
+  const common = {
+    stroke: style.strokeColor,
+    strokeWidth,
+    strokeOpacity: style.strokeOpacity,
+    fill: hexToRgba(style.fillColor, style.fillOpacity),
+    strokeDasharray: dashArray,
+  };
+
+  if (style.shapeKind === "line" || style.shapeKind === "arrow" || style.shapeKind === "doubleArrow") {
+    return (
+      <svg className="shape-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
+        <defs>{getArrowMarkerDefinitions(mark.id, style.strokeColor)}</defs>
+        <line
+          x1={0}
+          y1={mark.height / 2}
+          x2={mark.width}
+          y2={mark.height / 2}
+          stroke={style.strokeColor}
+          strokeWidth={style.strokeWidth}
+          strokeOpacity={style.strokeOpacity}
+          strokeDasharray={getDashArray(style.dashStyle, style.strokeWidth)}
+          markerStart={style.startArrowhead === "arrow" ? `url(#arrow-start-${mark.id})` : undefined}
+          markerEnd={style.endArrowhead === "arrow" ? `url(#arrow-end-${mark.id})` : undefined}
+        />
+      </svg>
+    );
+  }
+
+  if (style.shapeKind === "ellipse") {
+    return (
+      <svg className="shape-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
+        <ellipse cx={mark.width / 2} cy={mark.height / 2} rx={Math.max(1, mark.width / 2 - style.strokeWidth)} ry={Math.max(1, mark.height / 2 - style.strokeWidth)} {...common} strokeWidth={style.strokeWidth} />
+      </svg>
+    );
+  }
+
+  if (style.shapeKind === "polygon") {
+    return (
+      <svg className="shape-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
+        <polygon points={`${mark.width / 2},2 ${mark.width - 2},${mark.height * 0.38} ${mark.width * 0.82},${mark.height - 2} ${mark.width * 0.18},${mark.height - 2} 2,${mark.height * 0.38}`} {...common} strokeWidth={style.strokeWidth} />
+      </svg>
+    );
+  }
+
+  if (style.shapeKind === "cloud") {
+    return (
+      <svg className="shape-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
+        <path d={getCloudPath(mark.width, mark.height)} {...common} strokeWidth={style.strokeWidth} />
+      </svg>
+    );
+  }
+
+  if (style.shapeKind === "callout") {
+    return (
+      <>
+        <svg className="shape-svg callout-svg" viewBox={`0 0 ${Math.max(mark.width, leaderEnd.x)} ${Math.max(mark.height, leaderEnd.y)}`} aria-hidden="true">
+          <line
+            x1={mark.width * 0.5}
+            y1={mark.height}
+            x2={leaderEnd.x}
+            y2={leaderEnd.y}
+            stroke={style.strokeColor}
+            strokeWidth={style.strokeWidth}
+            strokeOpacity={style.strokeOpacity}
+            strokeDasharray={getDashArray(style.dashStyle, style.strokeWidth)}
+          />
+          <rect x={style.strokeWidth / 2} y={style.strokeWidth / 2} width={Math.max(1, mark.width - style.strokeWidth)} height={Math.max(1, mark.height - style.strokeWidth)} rx={8} {...common} strokeWidth={style.strokeWidth} />
+        </svg>
+        <div className="callout-text">{style.calloutText}</div>
+      </>
+    );
+  }
+
+  return (
+    <svg className="shape-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
+      <rect
+        x={style.strokeWidth / 2}
+        y={style.strokeWidth / 2}
+        width={Math.max(1, mark.width - style.strokeWidth)}
+        height={Math.max(1, mark.height - style.strokeWidth)}
+        rx={style.shapeKind === "roundedRectangle" ? style.cornerRadius : 0}
+        {...common}
+        strokeWidth={style.strokeWidth}
+      />
+    </svg>
+  );
+}
+
+function getArrowMarkerDefinitions(id: string, color: string) {
+  return (
+    <>
+      <marker id={`arrow-end-${id}`} markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+        <path d="M 0 0 L 12 6 L 0 12 z" fill={color} />
+      </marker>
+      <marker id={`arrow-start-${id}`} markerWidth="12" markerHeight="12" refX="2" refY="6" orient="auto" markerUnits="strokeWidth">
+        <path d="M 12 0 L 0 6 L 12 12 z" fill={color} />
+      </marker>
+    </>
   );
 }
 
@@ -2643,6 +3059,191 @@ function drawTextBoxToPdfPage({
   }
 }
 
+function drawShapeToPdfPage({
+  page,
+  mark,
+  font,
+  x,
+  y,
+  width,
+  height,
+  scale,
+}: {
+  page: PDFPage;
+  mark: Mark;
+  font: PDFFont;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
+}) {
+  const style = mark.shapeStyle;
+  if (!style) return;
+  const strokeWidth = Math.max(0.2, style.strokeWidth * scale);
+  const dashArray = getPdfDashArray(style.dashStyle, strokeWidth);
+  const strokeColor = colorToRgb(style.strokeColor);
+  const fillColor = colorToRgb(style.fillColor);
+  const rotation = degrees(mark.rotation);
+
+  if (style.shapeKind === "line" || style.shapeKind === "arrow" || style.shapeKind === "doubleArrow") {
+    const center = { x: x + width / 2, y: y + height / 2 };
+    const start = rotatePdfPoint(x, center.y, center.x, center.y, mark.rotation);
+    const end = rotatePdfPoint(x + width, center.y, center.x, center.y, mark.rotation);
+    page.drawLine({
+      start,
+      end,
+      thickness: strokeWidth,
+      color: strokeColor,
+      opacity: style.strokeOpacity,
+      dashArray,
+    });
+    if (style.startArrowhead === "arrow") drawPdfArrowhead(page, start, end, strokeColor, strokeWidth, style.strokeOpacity, true);
+    if (style.endArrowhead === "arrow") drawPdfArrowhead(page, start, end, strokeColor, strokeWidth, style.strokeOpacity, false);
+    return;
+  }
+
+  if (style.shapeKind === "ellipse") {
+    page.drawEllipse({
+      x: x + width / 2,
+      y: y + height / 2,
+      xScale: Math.max(1, width / 2),
+      yScale: Math.max(1, height / 2),
+      color: fillColor,
+      opacity: style.fillOpacity,
+      borderColor: strokeColor,
+      borderOpacity: style.strokeOpacity,
+      borderWidth: strokeWidth,
+      borderDashArray: dashArray,
+      rotate: rotation,
+    });
+    return;
+  }
+
+  if (style.shapeKind === "polygon") {
+    const path = `M ${width / 2} ${height} L ${width} ${height * 0.62} L ${width * 0.82} 0 L ${width * 0.18} 0 L 0 ${height * 0.62} Z`;
+    page.drawSvgPath(path, {
+      x,
+      y,
+      color: fillColor,
+      opacity: style.fillOpacity,
+      borderColor: strokeColor,
+      borderOpacity: style.strokeOpacity,
+      borderWidth: strokeWidth,
+      borderDashArray: dashArray,
+      rotate: rotation,
+    });
+    return;
+  }
+
+  if (style.shapeKind === "cloud") {
+    page.drawSvgPath(getCloudPath(width, height), {
+      x,
+      y,
+      color: fillColor,
+      opacity: style.fillOpacity,
+      borderColor: strokeColor,
+      borderOpacity: style.strokeOpacity,
+      borderWidth: strokeWidth,
+      borderDashArray: dashArray,
+      rotate: rotation,
+    });
+    return;
+  }
+
+  if (style.shapeKind === "roundedRectangle") {
+    page.drawSvgPath(getRoundedRectPath(width, height, style.cornerRadius * scale), {
+      x,
+      y,
+      color: fillColor,
+      opacity: style.fillOpacity,
+      borderColor: strokeColor,
+      borderOpacity: style.strokeOpacity,
+      borderWidth: strokeWidth,
+      borderDashArray: dashArray,
+      rotate: rotation,
+    });
+    return;
+  }
+
+  if (style.shapeKind === "callout") {
+    const leaderEnd = style.leaderEnd ?? { x: mark.width / 2, y: mark.height + 48 };
+    const leader = {
+      x: x + (leaderEnd.x / mark.width) * width,
+      y: y + height - (leaderEnd.y / mark.height) * height,
+    };
+    page.drawLine({
+      start: { x: x + width / 2, y },
+      end: leader,
+      thickness: strokeWidth,
+      color: strokeColor,
+      opacity: style.strokeOpacity,
+      dashArray,
+    });
+    page.drawRectangle({
+      x,
+      y,
+      width,
+      height,
+      color: fillColor,
+      opacity: style.fillOpacity,
+      borderColor: strokeColor,
+      borderOpacity: style.strokeOpacity,
+      borderWidth: strokeWidth,
+      borderDashArray: dashArray,
+      rotate: rotation,
+    });
+    page.drawText(style.calloutText || " ", {
+      x: x + 8 * scale,
+      y: y + height / 2 - 5 * scale,
+      size: Math.max(8, 12 * scale),
+      font,
+      color: strokeColor,
+      opacity: style.strokeOpacity,
+    });
+    return;
+  }
+
+  page.drawRectangle({
+    x,
+    y,
+    width,
+    height,
+    color: fillColor,
+    opacity: style.fillOpacity,
+    borderColor: strokeColor,
+    borderOpacity: style.strokeOpacity,
+    borderWidth: strokeWidth,
+    borderDashArray: dashArray,
+    rotate: rotation,
+  });
+}
+
+function drawPdfArrowhead(page: PDFPage, start: StrokePoint, end: StrokePoint, color: ReturnType<typeof colorToRgb>, strokeWidth: number, opacity: number, atStart: boolean) {
+  const tip = atStart ? start : end;
+  const tail = atStart ? end : start;
+  const angle = Math.atan2(tip.y - tail.y, tip.x - tail.x);
+  const length = Math.max(8, strokeWidth * 5);
+  const spread = Math.PI / 7;
+  const left = {
+    x: tip.x - length * Math.cos(angle - spread),
+    y: tip.y - length * Math.sin(angle - spread),
+  };
+  const right = {
+    x: tip.x - length * Math.cos(angle + spread),
+    y: tip.y - length * Math.sin(angle + spread),
+  };
+  page.drawLine({ start: tip, end: left, thickness: strokeWidth, color, opacity });
+  page.drawLine({ start: tip, end: right, thickness: strokeWidth, color, opacity });
+}
+
+function getRoundedRectPath(width: number, height: number, radius: number) {
+  const r = clamp(radius, 0, Math.min(width, height) / 2);
+  return `M ${r} 0 L ${width - r} 0 Q ${width} 0 ${width} ${r} L ${width} ${height - r} Q ${width} ${height} ${width - r} ${height} L ${r} ${height} Q 0 ${height} 0 ${
+    height - r
+  } L 0 ${r} Q 0 0 ${r} 0 Z`;
+}
+
 function rotatePdfPoint(x: number, y: number, originX: number, originY: number, rotation: number) {
   const radians = degreesToRadians(rotation);
   const dx = x - originX;
@@ -2753,6 +3354,29 @@ function getMarkupToolLabel(kind: TextMarkupKind) {
   if (kind === "textHighlight") return "Text highlight";
   if (kind === "underline") return "Underline";
   return "Strikethrough";
+}
+
+function isShapeTool(tool: Tool): tool is ShapeTool {
+  return typeof tool === "string" && tool.startsWith("shape:");
+}
+
+function getShapeKindFromTool(tool: ShapeTool): ShapeKind {
+  return tool.replace("shape:", "") as ShapeKind;
+}
+
+function getCloudPath(width: number, height: number) {
+  const w = Math.max(12, width);
+  const h = Math.max(12, height);
+  return [
+    `M ${w * 0.18} ${h * 0.62}`,
+    `C ${w * 0.02} ${h * 0.58}, ${w * 0.02} ${h * 0.34}, ${w * 0.22} ${h * 0.35}`,
+    `C ${w * 0.18} ${h * 0.12}, ${w * 0.46} ${h * 0.08}, ${w * 0.52} ${h * 0.25}`,
+    `C ${w * 0.66} ${h * 0.08}, ${w * 0.9} ${h * 0.2}, ${w * 0.82} ${h * 0.42}`,
+    `C ${w * 1.02} ${h * 0.46}, ${w * 0.95} ${h * 0.75}, ${w * 0.75} ${h * 0.68}`,
+    `C ${w * 0.67} ${h * 0.9}, ${w * 0.34} ${h * 0.88}, ${w * 0.34} ${h * 0.7}`,
+    `C ${w * 0.28} ${h * 0.78}, ${w * 0.16} ${h * 0.75}, ${w * 0.18} ${h * 0.62}`,
+    "Z",
+  ].join(" ");
 }
 
 function dataUrlToBytes(dataUrl: string) {
@@ -3046,9 +3670,9 @@ function clampMarkToPage(mark: Mark, pages: Pick<PageView, "pageNumber" | "width
 }
 
 function resizeMarkFromCorner(mark: Mark, corner: "nw" | "ne" | "sw" | "se", dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
-  if (mark.kind === "text" || mark.kind === "image" || (mark.kind === "pngSignature" && mark.lockAspectRatio === false)) {
+  if (mark.kind === "text" || mark.kind === "shape" || mark.kind === "image" || (mark.kind === "pngSignature" && mark.lockAspectRatio === false)) {
     const minWidth = mark.kind === "text" ? 64 : 24;
-    const minHeight = mark.kind === "text" ? 32 : 12;
+    const minHeight = mark.kind === "text" ? 32 : mark.kind === "shape" ? 8 : 12;
     const nextWidth = Math.max(minWidth, mark.width + (corner.includes("w") ? -dx : dx));
     const nextHeight = Math.max(minHeight, mark.height + (corner.includes("n") ? -dy : dy));
     const nextX = corner.includes("w") ? mark.x + mark.width - nextWidth : mark.x;
@@ -3151,6 +3775,24 @@ function moveMarkBy(mark: Mark, dx: number, dy: number, pages: Pick<PageView, "p
   };
 }
 
+function moveCalloutLeaderBy(mark: Mark, dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
+  if (mark.kind !== "shape" || mark.shapeStyle?.shapeKind !== "callout") return mark;
+  const page = pages.find((item) => item.pageNumber === mark.page);
+  const existing = mark.shapeStyle.leaderEnd ?? { x: mark.width / 2, y: mark.height + 48 };
+  const maxX = page ? Math.max(mark.width, page.width - mark.x) : mark.width * 2;
+  const maxY = page ? Math.max(mark.height, page.height - mark.y) : mark.height * 2;
+  return {
+    ...mark,
+    shapeStyle: {
+      ...mark.shapeStyle,
+      leaderEnd: {
+        x: clamp(existing.x + dx, 0, maxX),
+        y: clamp(existing.y + dy, 0, maxY),
+      },
+    },
+  };
+}
+
 function smoothStrokePoints(points: StrokePoint[]) {
   if (points.length <= 2) return points;
 
@@ -3235,6 +3877,7 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       mark.lockAspectRatio === other.lockAspectRatio &&
       JSON.stringify(mark.comment ?? null) === JSON.stringify(other.comment ?? null) &&
       JSON.stringify(mark.textStyle ?? null) === JSON.stringify(other.textStyle ?? null) &&
+      JSON.stringify(mark.shapeStyle ?? null) === JSON.stringify(other.shapeStyle ?? null) &&
       JSON.stringify(mark.markupRects ?? []) === JSON.stringify(other.markupRects ?? []) &&
       mark.strokeOpacity === other.strokeOpacity &&
       JSON.stringify(mark.strokePoints ?? []) === JSON.stringify(other.strokePoints ?? [])
@@ -3243,6 +3886,9 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
 }
 
 function getMarkLabel(mark: Mark) {
+  if (mark.kind === "shape" && mark.shapeStyle) {
+    return `${shapeToolLabels[mark.shapeStyle.shapeKind]} annotation`;
+  }
   if (mark.kind === "comment" && mark.comment) {
     return `${mark.comment.resolved ? "Resolved" : "Open"} comment annotation: ${getCommentPreview(mark.comment.body)}`;
   }
