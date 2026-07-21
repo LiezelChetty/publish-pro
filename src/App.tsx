@@ -1,14 +1,24 @@
 import {
+  BookOpen,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Download,
   FilePlus2,
+  Files,
+  Hand,
   Highlighter,
   Image as ImageIcon,
   Circle,
   CornerUpRight,
+  Maximize2,
   MessageSquare,
   Minus,
   MousePointer2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   PenLine,
   Pencil,
   Plus,
@@ -21,7 +31,6 @@ import {
   Trash2,
   Undo2,
   Underline,
-  Upload,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -77,12 +86,14 @@ import {
   type ShapeKind,
   type ShapeStyle,
 } from "./shapes";
+import { AppChrome } from "./components/app-shell/AppChrome";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
 type ShapeTool = `shape:${ShapeKind}`;
 type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | ShapeTool | TextMarkupKind;
 type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | "comment" | "shape" | TextMarkupKind;
+type LeftPanel = "pages" | "files" | "bookmarks" | "comments" | "search";
 type WorkState = {
   message: string;
   progress?: number;
@@ -164,7 +175,6 @@ const PAGE_SCALE = 1.35;
 const MAX_HISTORY_ENTRIES = 100;
 const BRAND_RED = "#d8342a";
 const BRAND_ICON_SRC = "/brand/publish-pro-icon.svg";
-const BRAND_LOGO_SRC = "/brand/publish-pro-logo.svg";
 const COMMENT_MARKER_SIZE = 32;
 
 const demoPages: PageView[] = [
@@ -229,6 +239,9 @@ export function App() {
   const [editingText, setEditingText] = useState<{ id: string; before: Mark; draft: string; isNew: boolean } | null>(null);
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
+  const [leftPanel, setLeftPanel] = useState<LeftPanel>("pages");
+  const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState(false);
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [workState, setWorkState] = useState<WorkState | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
@@ -314,6 +327,27 @@ export function App() {
       window.removeEventListener("keydown", handleDeleteShortcut);
     };
   }, [isBusy, selectedMark, marks]);
+
+  useEffect(() => {
+    function handleEscapeShortcut(event: KeyboardEvent) {
+      if (isBusy || event.key !== "Escape" || isEditableElement(event.target)) return;
+      if (activeTool !== "select") {
+        event.preventDefault();
+        setActiveTool("select");
+        return;
+      }
+      if (selectedMark) {
+        event.preventDefault();
+        setSelectedMark(null);
+      }
+    }
+
+    window.addEventListener("keydown", handleEscapeShortcut);
+
+    return () => {
+      window.removeEventListener("keydown", handleEscapeShortcut);
+    };
+  }, [activeTool, isBusy, selectedMark]);
 
   useEffect(() => {
     if (selected?.kind !== "comment" || !selected.comment) {
@@ -1184,127 +1218,200 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden="true">
-            <img src={BRAND_ICON_SRC} alt="" />
-          </div>
-          <div>
-            <h1>Publish Pro</h1>
-            <p>{pdfName}</p>
-          </div>
-        </div>
+    <main className={`app-shell ${isLeftPanelCollapsed ? "left-collapsed" : ""} ${isRightPanelCollapsed ? "right-collapsed" : ""}`}>
+      <AppChrome
+        logoSrc={BRAND_ICON_SRC}
+        documentName={pdfName}
+        isBusy={isBusy}
+        hasUnsavedChanges={history.past.length > 0}
+        onOpen={() => fileInput.current?.click()}
+        onExport={() => void exportPdf()}
+      />
+      <input className="hidden-file-input" ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
+      <input className="hidden-file-input" ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
+      <input className="hidden-file-input" ref={signatureInput} type="file" accept="image/png" onChange={handleSignatureUpload} aria-label="Choose PNG signature file" />
 
-        <div className="topbar-actions">
-          <button
-            className="button ghost"
-            onClick={() => fileInput.current?.click()}
-            disabled={isBusy}
-            title="Upload a PDF"
-            aria-label="Upload a PDF"
-          >
-            <Upload size={18} />
-            Upload
+      <nav className="main-toolbar" aria-label="PDF tools">
+        <div className="toolbar-group" aria-label="Navigation tools">
+          <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
+          <ToolButton icon={<Hand />} label="Hand tool" disabled />
+          <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} />
+          <span className="zoom-label">{Math.round(zoom * 100)}%</span>
+          <ToolButton icon={<ZoomIn />} label="Zoom in" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} disabled={isBusy} />
+          <ToolButton icon={<Maximize2 />} label="Fit page" onClick={() => setZoom(1)} disabled={isBusy} />
+          <button className="toolbar-text-button" onClick={() => setZoom(1.25)} disabled={isBusy} title="Fit width" aria-label="Fit width">
+            Fit width
           </button>
-          <button className="button primary" onClick={() => void exportPdf()} disabled={isBusy} title="Export edited PDF" aria-label="Export edited PDF">
-            <Download size={18} />
-            Export PDF
-          </button>
-          <input ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
-          <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
-          <input ref={signatureInput} type="file" accept="image/png" onChange={handleSignatureUpload} aria-label="Choose PNG signature file" />
         </div>
-      </header>
+        <div className="toolbar-group" aria-label="Edit tools">
+          <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
+          <ToolButton
+            icon={<ImageIcon />}
+            label="Add image"
+            active={activeTool === "image"}
+            onClick={() => {
+              setActiveTool("image");
+              imageInput.current?.click();
+            }}
+            disabled={isBusy}
+          />
+          <ToolButton
+            icon={<PenLine />}
+            label="Upload PNG signature"
+            active={activeTool === "pngSignature"}
+            onClick={() => {
+              setActiveTool("pngSignature");
+              signatureInput.current?.click();
+            }}
+            disabled={isBusy}
+          />
+          <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
+        </div>
+        <div className="toolbar-group" aria-label="Annotation tools">
+          <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
+          <ToolButton icon={<Highlighter />} label="Highlight selected text" active={activeTool === "textHighlight"} onClick={() => setActiveTool("textHighlight")} disabled={isBusy} />
+          <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
+          <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
+          <ToolButton icon={<Highlighter />} label="Add area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+          <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
+          <ToolButton icon={<Square />} label="Add rectangle" active={activeTool === "shape:rectangle"} onClick={() => setActiveTool("shape:rectangle")} disabled={isBusy} />
+          <ToolButton icon={<Circle />} label="Add ellipse" active={activeTool === "shape:ellipse"} onClick={() => setActiveTool("shape:ellipse")} disabled={isBusy} />
+          <ToolButton icon={<Minus />} label="Add line" active={activeTool === "shape:line"} onClick={() => setActiveTool("shape:line")} disabled={isBusy} />
+          <ToolButton icon={<CornerUpRight />} label="Add arrow" active={activeTool === "shape:arrow"} onClick={() => setActiveTool("shape:arrow")} disabled={isBusy} />
+          <ToolButton icon={<CornerUpRight />} label="Add double-ended arrow" active={activeTool === "shape:doubleArrow"} onClick={() => setActiveTool("shape:doubleArrow")} disabled={isBusy} />
+          <ToolButton icon={<Square />} label="Add rounded rectangle" active={activeTool === "shape:roundedRectangle"} onClick={() => setActiveTool("shape:roundedRectangle")} disabled={isBusy} />
+          <ToolButton icon={<Square />} label="Add polygon" active={activeTool === "shape:polygon"} onClick={() => setActiveTool("shape:polygon")} disabled={isBusy} />
+          <ToolButton icon={<Circle />} label="Add cloud" active={activeTool === "shape:cloud"} onClick={() => setActiveTool("shape:cloud")} disabled={isBusy} />
+          <ToolButton icon={<MessageSquare />} label="Add text callout" active={activeTool === "shape:callout"} onClick={() => setActiveTool("shape:callout")} disabled={isBusy} />
+          <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
+        </div>
+        <div className="toolbar-group" aria-label="Document actions">
+          <ToolButton icon={<Undo2 />} label="Undo" onClick={undo} disabled={!canUndo} />
+          <ToolButton icon={<Redo2 />} label="Redo" onClick={redo} disabled={!canRedo} />
+          <ToolButton icon={<Trash2 />} label="Delete selected annotation" onClick={removeSelectedMark} disabled={!selectedMark || isBusy} />
+          <ToolButton icon={<FilePlus2 />} label="Add a blank page" onClick={addPage} disabled={isBusy} />
+          <ToolButton icon={<Download />} label="Export edited PDF" onClick={() => void exportPdf()} disabled={isBusy} />
+        </div>
+      </nav>
 
       <section className="workspace">
-        <aside className="left-rail">
-          <div className="searchbox">
-            <Search size={16} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find page" aria-label="Find page" />
-          </div>
+        <nav className="left-nav" aria-label="Navigation panels">
+          <RailButton icon={<Files />} label="Files" active={leftPanel === "files" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("files"); setIsLeftPanelCollapsed(false); }} />
+          <RailButton icon={<FilePlus2 />} label="Pages" active={leftPanel === "pages" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("pages"); setIsLeftPanelCollapsed(false); }} />
+          <RailButton icon={<BookOpen />} label="Bookmarks" active={leftPanel === "bookmarks" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("bookmarks"); setIsLeftPanelCollapsed(false); }} />
+          <RailButton icon={<MessageSquare />} label="Comments" active={leftPanel === "comments" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("comments"); setIsLeftPanelCollapsed(false); }} />
+          <RailButton icon={<Search />} label="Search" active={leftPanel === "search" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("search"); setIsLeftPanelCollapsed(false); }} />
+          <button
+            className="rail-button rail-collapse"
+            onClick={() => setIsLeftPanelCollapsed((value) => !value)}
+            title={isLeftPanelCollapsed ? "Show left panel" : "Collapse left panel"}
+            aria-label={isLeftPanelCollapsed ? "Show left panel" : "Collapse left panel"}
+          >
+            {isLeftPanelCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
+        </nav>
 
-          <div className="page-list">
-            {filteredPages.map((page) => (
-              <button
-                className={`thumb ${currentPage === page.pageNumber ? "active" : ""}`}
-                key={page.pageNumber}
-                onClick={() => setCurrentPage(page.pageNumber)}
-                title={`Go to page ${page.pageNumber}`}
-                aria-label={`Go to page ${page.pageNumber}`}
-                aria-current={currentPage === page.pageNumber ? "page" : undefined}
-              >
-                <div className="thumb-page">
-                  {page.imageUrl ? <img src={page.imageUrl} alt="" /> : <FilePlus2 size={32} />}
-                </div>
-                <span>Page {page.pageNumber}</span>
+        {!isLeftPanelCollapsed ? (
+          <aside className="left-panel">
+            <div className="panel-header">
+              <div>
+                <h2>{getLeftPanelTitle(leftPanel)}</h2>
+                <span>{leftPanel === "pages" ? `${pages.length} pages` : pdfName}</span>
+              </div>
+              <button className="panel-icon-button" onClick={() => setIsLeftPanelCollapsed(true)} title="Collapse left panel" aria-label="Collapse left panel">
+                <PanelLeftClose size={16} />
               </button>
-            ))}
-          </div>
+            </div>
 
-          <div className="page-actions">
-            <button className="button ghost" onClick={addPage} disabled={isBusy} title="Add a blank page" aria-label="Add a blank page">
-              <Plus size={17} />
-              Add page
-            </button>
-            <button className="button ghost" onClick={duplicatePage} disabled={isBusy} title="Duplicate current page" aria-label="Duplicate current page">
-              <FilePlus2 size={17} />
-              Duplicate
-            </button>
-          </div>
-        </aside>
+            {leftPanel === "pages" ? (
+              <>
+                <div className="searchbox">
+                  <Search size={15} />
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find page" aria-label="Find page" />
+                </div>
+                <div className="page-list">
+                  {filteredPages.map((page) => (
+                    <button
+                      className={`thumb ${currentPage === page.pageNumber ? "active" : ""}`}
+                      key={page.pageNumber}
+                      onClick={() => setCurrentPage(page.pageNumber)}
+                      title={`Go to page ${page.pageNumber}`}
+                      aria-label={`Go to page ${page.pageNumber}`}
+                      aria-current={currentPage === page.pageNumber ? "page" : undefined}
+                    >
+                      <span className="thumb-grip" aria-hidden="true">::</span>
+                      <div className="thumb-page">
+                        {page.imageUrl ? <img src={page.imageUrl} alt="" /> : <FilePlus2 size={28} />}
+                      </div>
+                      <span>Page {page.pageNumber}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="page-actions">
+                  <button className="button ghost" onClick={addPage} disabled={isBusy} title="Add a blank page" aria-label="Add a blank page">
+                    <Plus size={15} />
+                    Add
+                  </button>
+                  <button className="button ghost" onClick={duplicatePage} disabled={isBusy} title="Duplicate current page" aria-label="Duplicate current page">
+                    <FilePlus2 size={15} />
+                    Duplicate
+                  </button>
+                </div>
+              </>
+            ) : null}
+
+            {leftPanel === "files" ? (
+              <div className="panel-empty">
+                <Files size={22} />
+                <strong>{pdfName}</strong>
+                <button className="button ghost" onClick={() => fileInput.current?.click()} disabled={isBusy} title="Open PDF" aria-label="Open PDF">
+                  Open PDF
+                </button>
+              </div>
+            ) : null}
+
+            {leftPanel === "bookmarks" ? (
+              <div className="panel-empty">
+                <BookOpen size={22} />
+                <strong>No bookmarks yet</strong>
+                <span>Bookmark management will appear here.</span>
+              </div>
+            ) : null}
+
+            {leftPanel === "comments" ? (
+              <div className="panel-list">
+                {comments.length > 0 ? (
+                  comments.map((mark) => (
+                    <button key={mark.id} className="left-comment" onClick={() => selectComment(mark)} title={getMarkLabel(mark)} aria-label={getMarkLabel(mark)}>
+                      <span>{mark.comment?.resolved ? "Resolved" : "Open"}</span>
+                      <strong>{getCommentPreview(mark.comment?.body ?? "")}</strong>
+                      <small>Page {mark.page}</small>
+                    </button>
+                  ))
+                ) : (
+                  <div className="panel-empty">
+                    <MessageSquare size={22} />
+                    <strong>No comments</strong>
+                    <span>Add a comment from the toolbar.</span>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {leftPanel === "search" ? (
+              <div className="panel-empty">
+                <Search size={22} />
+                <strong>Page search</strong>
+                <div className="searchbox full">
+                  <Search size={15} />
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find page number" aria-label="Find page number" />
+                </div>
+              </div>
+            ) : null}
+          </aside>
+        ) : null}
 
         <section className="editor">
-          <nav className="toolstrip" aria-label="PDF tools">
-            <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
-            <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
-            <ToolButton icon={<Highlighter />} label="Highlight selected text" active={activeTool === "textHighlight"} onClick={() => setActiveTool("textHighlight")} disabled={isBusy} />
-            <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
-            <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
-            <ToolButton icon={<Highlighter />} label="Add area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
-            <ToolButton icon={<Square />} label="Add rectangle" active={activeTool === "shape:rectangle"} onClick={() => setActiveTool("shape:rectangle")} disabled={isBusy} />
-            <ToolButton icon={<Circle />} label="Add ellipse" active={activeTool === "shape:ellipse"} onClick={() => setActiveTool("shape:ellipse")} disabled={isBusy} />
-            <ToolButton icon={<Minus />} label="Add line" active={activeTool === "shape:line"} onClick={() => setActiveTool("shape:line")} disabled={isBusy} />
-            <ToolButton icon={<CornerUpRight />} label="Add arrow" active={activeTool === "shape:arrow"} onClick={() => setActiveTool("shape:arrow")} disabled={isBusy} />
-            <ToolButton icon={<CornerUpRight />} label="Add double-ended arrow" active={activeTool === "shape:doubleArrow"} onClick={() => setActiveTool("shape:doubleArrow")} disabled={isBusy} />
-            <ToolButton icon={<Square />} label="Add rounded rectangle" active={activeTool === "shape:roundedRectangle"} onClick={() => setActiveTool("shape:roundedRectangle")} disabled={isBusy} />
-            <ToolButton icon={<Square />} label="Add polygon" active={activeTool === "shape:polygon"} onClick={() => setActiveTool("shape:polygon")} disabled={isBusy} />
-            <ToolButton icon={<Circle />} label="Add cloud" active={activeTool === "shape:cloud"} onClick={() => setActiveTool("shape:cloud")} disabled={isBusy} />
-            <ToolButton icon={<MessageSquare />} label="Add text callout" active={activeTool === "shape:callout"} onClick={() => setActiveTool("shape:callout")} disabled={isBusy} />
-            <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
-            <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
-            <ToolButton
-              icon={<PenLine />}
-              label="Upload PNG signature"
-              active={activeTool === "pngSignature"}
-              onClick={() => {
-                setActiveTool("pngSignature");
-                signatureInput.current?.click();
-              }}
-              disabled={isBusy}
-            />
-            <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
-            <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
-            <ToolButton
-              icon={<ImageIcon />}
-              label="Add image"
-              active={activeTool === "image"}
-              onClick={() => {
-                setActiveTool("image");
-                imageInput.current?.click();
-              }}
-              disabled={isBusy}
-            />
-            <div className="tool-divider" />
-            <ToolButton icon={<Undo2 />} label="Undo" onClick={undo} disabled={!canUndo} />
-            <ToolButton icon={<Redo2 />} label="Redo" onClick={redo} disabled={!canRedo} />
-            <div className="tool-divider" />
-            <ToolButton icon={<Trash2 />} label="Delete selected annotation" onClick={removeSelectedMark} disabled={!selectedMark || isBusy} />
-            <div className="tool-divider" />
-            <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} />
-            <span className="zoom-label">{Math.round(zoom * 100)}%</span>
-            <ToolButton icon={<ZoomIn />} label="Zoom in" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} disabled={isBusy} />
-          </nav>
 
           {errorMessage ? (
             <div className="status-message error" role="alert">
@@ -1360,8 +1467,17 @@ export function App() {
           </div>
         </section>
 
+        {!isRightPanelCollapsed ? (
         <aside className="inspector">
-          <h2>Properties</h2>
+          <div className="inspector-header">
+            <div>
+              <h2>Properties</h2>
+              <span>{selected ? getMarkLabel(selected) : activeTool === "draw" ? "Draw tool" : "Document"}</span>
+            </div>
+            <button className="panel-icon-button" onClick={() => setIsRightPanelCollapsed(true)} title="Collapse right panel" aria-label="Collapse right panel">
+              <PanelRightClose size={16} />
+            </button>
+          </div>
           {activeTool === "draw" ? (
             <div className="control-stack pen-controls">
               <label>
@@ -2245,7 +2361,43 @@ export function App() {
             </div>
           </div>
         </aside>
+        ) : (
+          <button className="right-panel-reopen" onClick={() => setIsRightPanelCollapsed(false)} title="Show properties panel" aria-label="Show properties panel">
+            <PanelRightOpen size={18} />
+          </button>
+        )}
       </section>
+      <footer className="statusbar" aria-label="Document status">
+        <div className="statusbar-group">
+          <button className="status-button" onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} disabled={currentPage <= 1 || isBusy} title="Previous page" aria-label="Previous page">
+            <ChevronLeft size={15} />
+          </button>
+          <span>
+            Page <strong>{currentPage}</strong> of {pages.length}
+          </span>
+          <button className="status-button" onClick={() => setCurrentPage((page) => Math.min(pages.length, page + 1))} disabled={currentPage >= pages.length || isBusy} title="Next page" aria-label="Next page">
+            <ChevronRight size={15} />
+          </button>
+        </div>
+        <div className="statusbar-group">
+          <button className="status-button" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} title="Zoom out" aria-label="Zoom out">
+            <ZoomOut size={15} />
+          </button>
+          <span className="status-zoom">{Math.round(zoom * 100)}%</span>
+          <button className="status-button" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} disabled={isBusy} title="Zoom in" aria-label="Zoom in">
+            <ZoomIn size={15} />
+          </button>
+          <button className="status-text-button" onClick={() => setZoom(1)} disabled={isBusy} title="Fit page" aria-label="Fit page">
+            Fit page
+          </button>
+          <button className="status-text-button" onClick={() => setZoom(1.25)} disabled={isBusy} title="Fit width" aria-label="Fit width">
+            Fit width
+          </button>
+        </div>
+        <div className="statusbar-meta">
+          {workState?.message ?? `${marks.length} edits`}
+        </div>
+      </footer>
     </main>
   );
 }
@@ -2764,7 +2916,6 @@ function DocumentPage({
 function BlankPage() {
   return (
     <div className="blank-page">
-      <img className="blank-logo" src={BRAND_LOGO_SRC} alt="Publish Pro" />
       <FilePlus2 size={34} aria-hidden="true" />
       <span>New PDF page</span>
     </div>
@@ -2889,13 +3040,39 @@ function ToolButton({
   label: string;
   active?: boolean;
   disabled?: boolean;
-  onClick: () => void;
+  onClick?: () => void;
 }) {
   return (
     <button className={`tool-button ${active ? "active" : ""}`} onClick={onClick} disabled={disabled} title={label} aria-label={label} aria-pressed={active}>
       {icon}
     </button>
   );
+}
+
+function RailButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: ReactElement;
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className={`rail-button ${active ? "active" : ""}`} onClick={onClick} title={label} aria-label={label} aria-pressed={active}>
+      {icon}
+    </button>
+  );
+}
+
+function getLeftPanelTitle(panel: LeftPanel) {
+  if (panel === "files") return "Files";
+  if (panel === "bookmarks") return "Bookmarks";
+  if (panel === "comments") return "Comments";
+  if (panel === "search") return "Search";
+  return "Pages";
 }
 
 function ProgressOverlay({ message, progress }: WorkState) {
