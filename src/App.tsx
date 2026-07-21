@@ -42,7 +42,7 @@ import {
   type PDFPageProxy,
 } from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
-import { ChangeEvent, PointerEvent, ReactElement, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, PointerEvent, ReactElement, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   commentMatchesFilter,
   createCommentData,
@@ -125,6 +125,7 @@ type TextItemView = {
 type Mark = {
   id: string;
   kind: MarkKind;
+  pageId?: string;
   page: number;
   x: number;
   y: number;
@@ -190,6 +191,29 @@ type SourceDocument = {
 };
 
 type BlankPagePreset = "a4Portrait" | "a4Landscape" | "a3Portrait" | "a3Landscape" | "letterPortrait" | "letterLandscape" | "legalPortrait" | "legalLandscape" | "matchCurrent" | "custom";
+type PageDialog = "blank" | "merge" | "replace" | "split" | "extract" | "labels" | null;
+type InsertPosition = "start" | "before" | "after" | "end";
+type DimensionUnit = "mm" | "cm" | "in" | "pt";
+type PageOrientation = "portrait" | "landscape";
+type SplitMode = "afterCurrent" | "everyN" | "ranges" | "selected" | "selectedBoundaries";
+
+type MergeQueueItem = {
+  id: string;
+  file: File;
+  name: string;
+  bytes: Uint8Array;
+  sourceDocumentId: string;
+  pdfDoc: PDFDocumentProxy;
+  pageCount: number;
+  range: string;
+  error?: string;
+};
+
+type PageContextMenuState = {
+  x: number;
+  y: number;
+  pageId: string;
+} | null;
 
 const PAGE_SCALE = 1.35;
 const MAX_HISTORY_ENTRIES = 100;
@@ -274,10 +298,30 @@ export function App() {
   const [pageDropTargetId, setPageDropTargetId] = useState<string | null>(null);
   const [pageDropPosition, setPageDropPosition] = useState<"before" | "after">("after");
   const [blankPagePreset, setBlankPagePreset] = useState<BlankPagePreset>("matchCurrent");
+  const [blankPageOrientation, setBlankPageOrientation] = useState<PageOrientation>("portrait");
+  const [blankPageUnit, setBlankPageUnit] = useState<DimensionUnit>("pt");
+  const [blankPageBackground, setBlankPageBackground] = useState("#ffffff");
   const [blankPageQuantity, setBlankPageQuantity] = useState(1);
   const [blankPageLabel, setBlankPageLabel] = useState("");
   const [customPageWidth, setCustomPageWidth] = useState(612);
   const [customPageHeight, setCustomPageHeight] = useState(792);
+  const [activePageDialog, setActivePageDialog] = useState<PageDialog>(null);
+  const [pageContextMenu, setPageContextMenu] = useState<PageContextMenuState>(null);
+  const [mergeQueue, setMergeQueue] = useState<MergeQueueItem[]>([]);
+  const [mergeInsertPosition, setMergeInsertPosition] = useState<InsertPosition>("after");
+  const [replaceFile, setReplaceFile] = useState<MergeQueueItem | null>(null);
+  const [replaceSourcePage, setReplaceSourcePage] = useState(1);
+  const [replacePreserveAnnotations, setReplacePreserveAnnotations] = useState(true);
+  const [splitMode, setSplitMode] = useState<SplitMode>("afterCurrent");
+  const [splitEveryN, setSplitEveryN] = useState(1);
+  const [splitRanges, setSplitRanges] = useState("");
+  const [extractDeleteAfter, setExtractDeleteAfter] = useState(false);
+  const [extractFilename, setExtractFilename] = useState("");
+  const [labelPrefix, setLabelPrefix] = useState("");
+  const [labelSuffix, setLabelSuffix] = useState("");
+  const [labelStart, setLabelStart] = useState(1);
+  const [labelPadding, setLabelPadding] = useState(2);
+  const [labelFormat, setLabelFormat] = useState<"number" | "roman" | "alpha">("number");
   const [isDragging, setIsDragging] = useState(false);
   const [workState, setWorkState] = useState<WorkState | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
@@ -289,6 +333,10 @@ export function App() {
 
   const selected = marks.find((mark) => mark.id === selectedMark) ?? null;
   const comments = marks.filter((mark) => mark.kind === "comment" && mark.comment);
+  const currentPageView = pages.find((page) => page.pageNumber === currentPage) ?? pages[0];
+  const selectedPageCount = selectedPageIds.filter((id) => pages.some((page) => page.id === id)).length;
+  const activePageIds = selectedPageIds.length > 0 ? selectedPageIds.filter((id) => pages.some((page) => page.id === id)) : currentPageView ? [currentPageView.id] : [];
+  const pageAnnotations = useMemo(() => countAnnotationsByPageId(marks, pages), [marks, pages]);
   const visibleComments = comments.filter((mark) => {
     if (!mark.comment) return false;
     return (showAllComments || mark.page === currentPage) && commentMatchesFilter(mark.comment.resolved, commentFilter);
@@ -301,6 +349,35 @@ export function App() {
     const normalized = query.trim().toLowerCase();
     return pages.filter((page) => String(page.pageNumber).includes(normalized));
   }, [pages, query]);
+
+  function getPageByNumber(pageNumber: number) {
+    return pages.find((page) => page.pageNumber === pageNumber) ?? pages[0];
+  }
+
+  function getPageIdForNumber(pageNumber: number) {
+    return getPageByNumber(pageNumber)?.id;
+  }
+
+  function markPageId(mark: Mark, pageSet = pages) {
+    if (mark.pageId && pageSet.some((page) => page.id === mark.pageId)) return mark.pageId;
+    return pageSet.find((page) => page.pageNumber === mark.page)?.id;
+  }
+
+  function markBelongsToPage(mark: Mark, page: PageView) {
+    return markPageId(mark) === page.id;
+  }
+
+  function marksForPageIds(pageIds: string[], markSet = marks, pageSet = pages) {
+    const idSet = new Set(pageIds);
+    return markSet.filter((mark) => {
+      const id = markPageId(mark, pageSet);
+      return id ? idSet.has(id) : false;
+    });
+  }
+
+  function withPageId(mark: Mark, pageNumber = mark.page): Mark {
+    return { ...mark, pageId: mark.pageId ?? getPageIdForNumber(pageNumber), page: pageNumber };
+  }
 
   useEffect(() => {
     function handleKeyboardShortcut(event: KeyboardEvent) {
@@ -422,6 +499,24 @@ export function App() {
       window.removeEventListener("keydown", handleEscape);
     };
   }, [activeTool, selected]);
+
+  useEffect(() => {
+    if (!pageContextMenu && !activePageDialog) return;
+    function handleDismiss(event: KeyboardEvent | MouseEvent) {
+      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
+      if (event instanceof MouseEvent && (event.target as HTMLElement).closest(".page-context-menu, .modal-card")) return;
+      if (event instanceof KeyboardEvent) event.preventDefault();
+      setPageContextMenu(null);
+      if (event instanceof KeyboardEvent) setActivePageDialog(null);
+    }
+
+    window.addEventListener("keydown", handleDismiss);
+    window.addEventListener("mousedown", handleDismiss);
+    return () => {
+      window.removeEventListener("keydown", handleDismiss);
+      window.removeEventListener("mousedown", handleDismiss);
+    };
+  }, [pageContextMenu, activePageDialog]);
 
   useEffect(() => {
     if (!pdfDoc) return;
@@ -549,6 +644,7 @@ export function App() {
       const mark: Mark = {
         id: crypto.randomUUID(),
         kind: "image",
+        pageId: getPageIdForNumber(currentPage),
         page: currentPage,
         x: (page.width - width) / 2,
         y: (page.height - height) / 2,
@@ -615,6 +711,7 @@ export function App() {
       const mark: Mark = {
         id: crypto.randomUUID(),
         kind: "comment",
+        pageId: getPageIdForNumber(pageNumber),
         page: pageNumber,
         x,
         y,
@@ -635,6 +732,7 @@ export function App() {
     const mark: Mark = {
       id: crypto.randomUUID(),
       kind: activeTool,
+      pageId: getPageIdForNumber(pageNumber),
       page: pageNumber,
       x,
       y,
@@ -662,6 +760,7 @@ export function App() {
     const mark: Mark = {
       id: crypto.randomUUID(),
       kind: "shape",
+      pageId: getPageIdForNumber(pageNumber),
       page: pageNumber,
       x: placement.x,
       y: placement.y,
@@ -687,6 +786,7 @@ export function App() {
     const mark: Mark = {
       id: crypto.randomUUID(),
       kind: "text",
+      pageId: getPageIdForNumber(pageNumber),
       page: pageNumber,
       x: width === undefined ? x : Math.min(x, page.width - boxWidth),
       y: height === undefined ? y : Math.min(y, page.height - boxHeight),
@@ -714,6 +814,7 @@ export function App() {
     const mark: Mark = {
       id: crypto.randomUUID(),
       kind: activeTool,
+      pageId: getPageIdForNumber(pageNumber),
       page: pageNumber,
       x: bounds.x,
       y: bounds.y,
@@ -741,6 +842,7 @@ export function App() {
     const mark: Mark = {
       id: crypto.randomUUID(),
       kind: "pngSignature",
+      pageId: getPageIdForNumber(pageNumber),
       page: pageNumber,
       x: width === undefined ? x - markWidth / 2 : x,
       y: height === undefined ? y - markHeight / 2 : y,
@@ -786,6 +888,7 @@ export function App() {
     const stroke: Mark = {
       id: crypto.randomUUID(),
       kind: "stroke",
+      pageId: getPageIdForNumber(pageNumber),
       page: pageNumber,
       x: bounds.x,
       y: bounds.y,
@@ -814,20 +917,20 @@ export function App() {
   function duplicateSelectedMark() {
     if (!selected) return;
     const duplicate = duplicateMark(selected, currentPage);
-    commitMarks([...marks, clampMarkToPage(duplicate, pages)], duplicate.id);
+    commitMarks([...marks, clampMarkToPage(withPageId(duplicate, currentPage), pages)], duplicate.id);
   }
 
   function duplicateMarkById(id: string) {
     const mark = marks.find((item) => item.id === id);
     if (!mark) return;
     const duplicate = duplicateMark(mark, currentPage);
-    commitMarks([...marks, clampMarkToPage(duplicate, pages)], duplicate.id);
+    commitMarks([...marks, clampMarkToPage(withPageId(duplicate, currentPage), pages)], duplicate.id);
   }
 
   function pasteCopiedMark() {
     if (!copiedMark) return;
     const pasted = duplicateMark(copiedMark, currentPage);
-    commitMarks([...marks, clampMarkToPage(pasted, pages)], pasted.id);
+    commitMarks([...marks, clampMarkToPage(withPageId(pasted, currentPage), pages)], pasted.id);
   }
 
   function startTextEdit(mark: Mark) {
@@ -961,7 +1064,8 @@ export function App() {
   }
 
   function selectComment(mark: Mark) {
-    setCurrentPage(mark.page);
+    const page = pages.find((item) => item.id === markPageId(mark)) ?? pages.find((item) => item.pageNumber === mark.page);
+    setCurrentPage(page?.pageNumber ?? mark.page);
     setSelectedMark(mark.id);
   }
 
@@ -987,6 +1091,51 @@ export function App() {
     }
     setSelectedPageIds([page.id]);
     setLastSelectedPageId(page.id);
+  }
+
+  function openPageContextMenu(page: PageView, event: ReactMouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    if (!selectedPageIds.includes(page.id)) {
+      setSelectedPageIds([page.id]);
+      setLastSelectedPageId(page.id);
+      setCurrentPage(page.pageNumber);
+    }
+    setPageContextMenu({
+      x: Math.min(event.clientX, window.innerWidth - 230),
+      y: Math.min(event.clientY, window.innerHeight - 360),
+      pageId: page.id,
+    });
+  }
+
+  function runPageMenuAction(action: () => void | Promise<void>) {
+    setPageContextMenu(null);
+    void action();
+  }
+
+  function handlePageThumbKeyDown(page: PageView, event: ReactKeyboardEvent<HTMLButtonElement>) {
+    const index = pages.findIndex((item) => item.id === page.id);
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const next = pages[Math.min(pages.length - 1, index + 1)];
+      if (next) {
+        setCurrentPage(next.pageNumber);
+        setSelectedPageIds([next.id]);
+        setLastSelectedPageId(next.id);
+      }
+    }
+    if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+      event.preventDefault();
+      const previous = pages[Math.max(0, index - 1)];
+      if (previous) {
+        setCurrentPage(previous.pageNumber);
+        setSelectedPageIds([previous.id]);
+        setLastSelectedPageId(previous.id);
+      }
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      handlePageSelect(page, event as unknown as ReactMouseEvent<HTMLButtonElement>);
+    }
   }
 
   function selectAllPages() {
@@ -1019,16 +1168,26 @@ export function App() {
     if (activeIds.length === 0) return;
     const sourcePages = pages.filter((page) => activeIds.includes(page.id));
     const insertIndex = Math.max(...sourcePages.map((page) => pages.findIndex((item) => item.id === page.id))) + 1;
-    const pageCopies = sourcePages.map((page) => ({ ...page, id: crypto.randomUUID(), label: page.label ? `${page.label} copy` : page.label }));
-    const pageNumberMap = new Map(sourcePages.map((page, index) => [page.pageNumber, insertIndex + index + 1]));
-    const markCopies = marks
-      .filter((mark) => pageNumberMap.has(mark.page))
-      .map((mark) => ({
-        ...duplicateMark(mark, pageNumberMap.get(mark.page) ?? mark.page),
-        comment: mark.comment ? cloneComment(mark.comment) : mark.comment,
-      }));
+    const pageIdMap = new Map<string, string>();
+    const pageCopies = sourcePages.map((page) => {
+      const nextId = crypto.randomUUID();
+      pageIdMap.set(page.id, nextId);
+      return { ...page, id: nextId, label: page.label ? `${page.label} Copy` : page.label };
+    });
+    const markCopies = marksForPageIds(activeIds)
+      .map((mark): Mark => {
+        const oldPageId = markPageId(mark);
+        const nextPageId = oldPageId ? pageIdMap.get(oldPageId) : undefined;
+        const nextPageNumber = nextPageId ? insertIndex + pageCopies.findIndex((page) => page.id === nextPageId) + 1 : mark.page;
+        return {
+          ...duplicateMark(mark, nextPageNumber),
+          pageId: nextPageId,
+          comment: mark.comment ? cloneComment(mark.comment) : mark.comment,
+        };
+      })
+      .filter((mark): mark is Mark => Boolean(mark.pageId));
     const nextPages = renumberPages([...pages.slice(0, insertIndex), ...pageCopies, ...pages.slice(insertIndex)]);
-    const nextMarks = [...remapMarksForPages(marks, pages, nextPages), ...markCopies];
+    const nextMarks = [...marks, ...markCopies];
     const nextSelectedIds = pageCopies.map((page) => page.id);
     commitDocument(nextPages, nextMarks, nextSelectedIds.length ? markCopies[0]?.id ?? null : selectedMark, insertIndex + 1, nextSelectedIds);
   }
@@ -1037,27 +1196,30 @@ export function App() {
     const activeIds = getActivePageIds();
     if (activeIds.length === 0) return;
     if (activeIds.length > 1 && !window.confirm(`Delete ${activeIds.length} selected pages?`)) return;
-    const deletedNumbers = new Set(pages.filter((page) => activeIds.includes(page.id)).map((page) => page.pageNumber));
     let remainingPages = pages.filter((page) => !activeIds.includes(page.id));
     if (remainingPages.length === 0) remainingPages = [createBlankPageView(1, getBlankPageSize("letterPortrait"), "Blank")];
     const nextPages = renumberPages(remainingPages);
-    const nextMarks = remapMarksForPages(
-      marks.filter((mark) => !deletedNumbers.has(mark.page)),
-      pages,
-      nextPages
-    );
+    const deletedIds = new Set(activeIds);
+    const nextMarks = marks.filter((mark) => {
+      const id = markPageId(mark);
+      return id ? !deletedIds.has(id) : true;
+    });
     const nextPage = Math.min(currentPage, nextPages.length);
     const selectedPage = nextPages[nextPage - 1] ?? nextPages[0];
     commitDocument(nextPages, nextMarks, null, selectedPage.pageNumber, [selectedPage.id]);
   }
 
-  async function rotateSelectedPages(delta: 90 | -90) {
+  async function rotateSelectedPages(delta: 90 | -90 | 180) {
     const activeIds = getActivePageIds();
     if (activeIds.length === 0) return;
     setWorkState({ message: "Rotating pages", progress: 20 });
     const rotatedPages = await Promise.all(pages.map((page) => (activeIds.includes(page.id) ? rotatePageView(page, delta) : page)));
-    const rotatedNumbers = new Set(pages.filter((page) => activeIds.includes(page.id)).map((page) => page.pageNumber));
-    const nextMarks = marks.map((mark) => (rotatedNumbers.has(mark.page) ? rotateMarkForPage(mark, pages.find((page) => page.pageNumber === mark.page)!, delta) : mark));
+    const rotatedIds = new Set(activeIds);
+    const nextMarks = marks.map((mark) => {
+      const pageId = markPageId(mark);
+      const page = pageId ? pages.find((item) => item.id === pageId) : undefined;
+      return page && rotatedIds.has(page.id) ? rotateMarkForPage({ ...mark, pageId: page.id, page: page.pageNumber }, page, delta) : mark;
+    });
     setWorkState(null);
     commitDocument(rotatedPages, nextMarks, selectedMark, currentPage, activeIds);
   }
@@ -1069,16 +1231,29 @@ export function App() {
       blankPagePreset === "matchCurrent" && current
         ? { width: current.width / PAGE_SCALE, height: current.height / PAGE_SCALE }
         : blankPagePreset === "custom"
-        ? { width: customPageWidth, height: customPageHeight }
+        ? { width: dimensionToPoints(customPageWidth, blankPageUnit), height: dimensionToPoints(customPageHeight, blankPageUnit) }
         : getBlankPageSize(blankPagePreset);
+    if (size.width < 72 || size.height < 72 || size.width > 2880 || size.height > 2880) {
+      setErrorMessage("Blank page dimensions must be between 72 and 2880 points.");
+      return;
+    }
     const quantity = clamp(Math.round(blankPageQuantity), 1, 50);
-    const blanks = Array.from({ length: quantity }, (_, index) => createBlankPageView(0, size, blankPageLabel ? `${blankPageLabel}${quantity > 1 ? ` ${index + 1}` : ""}` : undefined));
+    const orientedSize =
+      blankPageOrientation === "landscape" && size.height > size.width
+        ? { width: size.height, height: size.width }
+        : blankPageOrientation === "portrait" && size.width > size.height
+        ? { width: size.height, height: size.width }
+        : size;
+    const blanks = Array.from({ length: quantity }, (_, index) => ({
+      ...createBlankPageView(0, orientedSize, blankPageLabel ? `${blankPageLabel}${quantity > 1 ? ` ${index + 1}` : ""}` : undefined),
+      background: blankPageBackground || "#ffffff",
+    }));
     const nextPages = renumberPages([...pages.slice(0, targetIndex), ...blanks, ...pages.slice(targetIndex)]);
     const selectedIds = blanks.map((page) => page.id);
-    commitDocument(nextPages, remapMarksForPages(marks, pages, nextPages), null, targetIndex + 1, selectedIds);
+    commitDocument(nextPages, marks, null, targetIndex + 1, selectedIds);
   }
 
-  function getPageInsertionIndex(position: "before" | "after" | "start" | "end") {
+  function getPageInsertionIndex(position: InsertPosition) {
     if (position === "start") return 0;
     if (position === "end") return pages.length;
     const activeIds = getActivePageIds();
@@ -1091,7 +1266,44 @@ export function App() {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
     if (files.length === 0) return;
-    await importPdfFiles(files, "after");
+    await addFilesToMergeQueue(files);
+    setActivePageDialog("merge");
+  }
+
+  async function addFilesToMergeQueue(files: File[]) {
+    const items: MergeQueueItem[] = [];
+    for (const file of files) {
+      const id = crypto.randomUUID();
+      try {
+        if (file.size === 0) throw new Error("Empty file.");
+        if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) throw new Error("Unsupported file type.");
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const pdfDoc = await getDocument({ data: bytes.slice() }).promise;
+        items.push({
+          id,
+          file,
+          name: file.name,
+          bytes,
+          sourceDocumentId: crypto.randomUUID(),
+          pdfDoc,
+          pageCount: pdfDoc.numPages,
+          range: `1-${pdfDoc.numPages}`,
+        });
+      } catch (error) {
+        items.push({
+          id,
+          file,
+          name: file.name,
+          bytes: new Uint8Array(),
+          sourceDocumentId: crypto.randomUUID(),
+          pdfDoc: null as unknown as PDFDocumentProxy,
+          pageCount: 0,
+          range: "",
+          error: getPdfErrorMessage(error, "upload"),
+        });
+      }
+    }
+    setMergeQueue((existing) => [...existing, ...items]);
   }
 
   async function importPdfFiles(files: File[], position: "before" | "after" | "end" = "after") {
@@ -1121,11 +1333,121 @@ export function App() {
       const insertIndex = getPageInsertionIndex(position);
       const nextPages = renumberPages([...pages.slice(0, insertIndex), ...importedPages, ...pages.slice(insertIndex)]);
       const selectedIds = importedPages.map((page) => page.id);
-      commitDocument(nextPages, remapMarksForPages(marks, pages, nextPages), null, insertIndex + 1, selectedIds);
+      commitDocument(nextPages, marks, null, insertIndex + 1, selectedIds);
       setWorkState(null);
     } catch (error) {
       setWorkState(null);
       setErrorMessage(getPdfErrorMessage(error, "upload"));
+    }
+  }
+
+  async function importMergeQueue() {
+    const validItems = mergeQueue.filter((item) => !item.error && item.pageCount > 0);
+    if (validItems.length === 0) {
+      setErrorMessage("Add at least one valid PDF before importing.");
+      return;
+    }
+
+    try {
+      setErrorMessage("");
+      const importedPages: PageView[] = [];
+      const importedSources: Record<string, SourceDocument> = {};
+      let completed = 0;
+      const totalPages = validItems.reduce((total, item) => total + parsePageRanges(item.range, item.pageCount).flat().length, 0);
+
+      for (const item of validItems) {
+        const ranges = parsePageRanges(item.range || `1-${item.pageCount}`, item.pageCount);
+        importedSources[item.sourceDocumentId] = { id: item.sourceDocumentId, name: item.name, bytes: item.bytes };
+        for (const pageNumber of ranges.flat()) {
+          completed += 1;
+          setWorkState({ message: `Importing ${item.name}`, progress: (completed / Math.max(1, totalPages)) * 90 });
+          importedPages.push(await renderPage(await item.pdfDoc.getPage(pageNumber), item.sourceDocumentId));
+        }
+      }
+
+      const insertIndex = getPageInsertionIndex(mergeInsertPosition);
+      const nextPages = renumberPages([...pages.slice(0, insertIndex), ...importedPages, ...pages.slice(insertIndex)]);
+      setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
+      commitDocument(nextPages, marks, null, insertIndex + 1, importedPages.map((page) => page.id));
+      setMergeQueue([]);
+      setActivePageDialog(null);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(error instanceof Error ? error.message : "The selected PDFs could not be imported.");
+    }
+  }
+
+  function moveMergeQueueItem(id: string, direction: -1 | 1) {
+    setMergeQueue((existing) => {
+      const index = existing.findIndex((item) => item.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= existing.length) return existing;
+      const next = [...existing];
+      const [item] = next.splice(index, 1);
+      next.splice(nextIndex, 0, item);
+      return next;
+    });
+  }
+
+  function updateMergeQueueItem(id: string, patch: Partial<MergeQueueItem>) {
+    setMergeQueue((existing) => existing.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  }
+
+  function removeMergeQueueItem(id: string) {
+    setMergeQueue((existing) => existing.filter((item) => item.id !== id));
+  }
+
+  async function handleReplaceFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      setErrorMessage("");
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const pdfDoc = await getDocument({ data: bytes.slice() }).promise;
+      setReplaceFile({
+        id: crypto.randomUUID(),
+        file,
+        name: file.name,
+        bytes,
+        sourceDocumentId: crypto.randomUUID(),
+        pdfDoc,
+        pageCount: pdfDoc.numPages,
+        range: `1-${pdfDoc.numPages}`,
+      });
+      setReplaceSourcePage(1);
+    } catch (error) {
+      setErrorMessage(getPdfErrorMessage(error, "upload"));
+    }
+  }
+
+  async function replaceSelectedPage() {
+    const destination = pages.find((page) => page.id === getActivePageIds()[0]);
+    if (!destination || !replaceFile || replaceFile.error) return;
+    try {
+      setErrorMessage("");
+      setWorkState({ message: "Replacing page", progress: 30 });
+      const sourcePage = await replaceFile.pdfDoc.getPage(clamp(Math.round(replaceSourcePage), 1, replaceFile.pageCount));
+      const replacement = await renderPage(sourcePage, replaceFile.sourceDocumentId);
+      const nextPage: PageView = {
+        ...replacement,
+        id: destination.id,
+        pageNumber: destination.pageNumber,
+        label: destination.label,
+      };
+      const nextPages = pages.map((page) => (page.id === destination.id ? nextPage : page));
+      const nextMarks = replacePreserveAnnotations
+        ? scaleMarksForReplacement(marks, destination, nextPage)
+        : marks.filter((mark) => markPageId(mark) !== destination.id);
+      setSourceDocuments((existing) => ({ ...existing, [replaceFile.sourceDocumentId]: { id: replaceFile.sourceDocumentId, name: replaceFile.name, bytes: replaceFile.bytes } }));
+      commitDocument(nextPages, nextMarks, null, destination.pageNumber, [destination.id]);
+      setReplaceFile(null);
+      setActivePageDialog(null);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(getPdfErrorMessage(error, "render"));
     }
   }
 
@@ -1148,24 +1470,25 @@ export function App() {
   function copySelectedPages() {
     const activeIds = getActivePageIds();
     const copied = pages.filter((page) => activeIds.includes(page.id));
-    const copiedNumbers = new Set(copied.map((page) => page.pageNumber));
-    setCopiedPages({ pages: copied, marks: marks.filter((mark) => copiedNumbers.has(mark.page)) });
+    setCopiedPages({ pages: copied, marks: marksForPageIds(copied.map((page) => page.id)) });
   }
 
   function pasteCopiedPages(position: "before" | "after" | "end" = "after") {
     if (!copiedPages || copiedPages.pages.length === 0) return;
     const insertIndex = position === "end" ? pages.length : getPageInsertionIndex(position);
-    const oldToNewPageNumber = new Map<number, number>();
+    const oldToNewPageId = new Map<string, string>();
     const pageCopies = copiedPages.pages.map((page, index) => {
-      oldToNewPageNumber.set(page.pageNumber, insertIndex + index + 1);
-      return { ...page, id: crypto.randomUUID(), label: page.label ? `${page.label} copy` : page.label };
+      const nextId = crypto.randomUUID();
+      oldToNewPageId.set(page.id, nextId);
+      return { ...page, id: nextId, pageNumber: insertIndex + index + 1, label: page.label ? `${page.label} Copy` : page.label };
     });
-    const markCopies = copiedPages.marks.map((mark) => ({
-      ...duplicateMark(mark, oldToNewPageNumber.get(mark.page) ?? mark.page),
+    const markCopies = copiedPages.marks.map((mark): Mark => ({
+      ...duplicateMark(mark, pageCopies.find((page) => page.id === oldToNewPageId.get(mark.pageId ?? ""))?.pageNumber ?? mark.page),
+      pageId: mark.pageId ? oldToNewPageId.get(mark.pageId) : undefined,
       comment: mark.comment ? cloneComment(mark.comment) : mark.comment,
-    }));
+    })).filter((mark): mark is Mark => Boolean(mark.pageId));
     const nextPages = renumberPages([...pages.slice(0, insertIndex), ...pageCopies, ...pages.slice(insertIndex)]);
-    const nextMarks = [...remapMarksForPages(marks, pages, nextPages), ...markCopies];
+    const nextMarks = [...marks, ...markCopies];
     commitDocument(nextPages, nextMarks, null, insertIndex + 1, pageCopies.map((page) => page.id));
   }
 
@@ -1173,9 +1496,26 @@ export function App() {
     const activeIds = getActivePageIds();
     const selectedPages = pages.filter((page) => activeIds.includes(page.id));
     if (selectedPages.length === 0) return;
-    const exportedPdf = await buildPdfFromPages(selectedPages, marks.filter((mark) => selectedPages.some((page) => page.pageNumber === mark.page)));
+    const exportedPdf = await buildPdfFromPages(selectedPages, marksForPageIds(selectedPages.map((page) => page.id)));
     downloadPdfBytes(await exportedPdf.save(), `${pdfName.replace(/\.pdf$/i, "")}-extract.pdf`);
     if (removeAfterExtract) deleteSelectedPages();
+  }
+
+  async function runExtractDialog() {
+    const activeIds = getActivePageIds();
+    const selectedPages = pages.filter((page) => activeIds.includes(page.id));
+    if (selectedPages.length === 0) {
+      setErrorMessage("Select at least one page to extract.");
+      return;
+    }
+    try {
+      const exportedPdf = await buildPdfFromPages(selectedPages, marksForPageIds(selectedPages.map((page) => page.id)));
+      downloadPdfBytes(await exportedPdf.save(), `${(extractFilename.trim() || pdfName.replace(/\.pdf$/i, "") + "-extract").replace(/\.pdf$/i, "")}.pdf`);
+      if (extractDeleteAfter) deleteSelectedPages();
+      setActivePageDialog(null);
+    } catch (error) {
+      setErrorMessage(getPdfErrorMessage(error, "export"));
+    }
   }
 
   async function splitAfterCurrentPage() {
@@ -1185,14 +1525,83 @@ export function App() {
       setErrorMessage("Choose a page that leaves pages on both sides of the split.");
       return;
     }
-    downloadPdfBytes(await (await buildPdfFromPages(first, marks.filter((mark) => mark.page <= currentPage))).save(), `${pdfName.replace(/\.pdf$/i, "")}-part-1.pdf`);
-    downloadPdfBytes(await (await buildPdfFromPages(second, marks.filter((mark) => mark.page > currentPage))).save(), `${pdfName.replace(/\.pdf$/i, "")}-part-2.pdf`);
+    downloadPdfBytes(await (await buildPdfFromPages(first, marksForPageIds(first.map((page) => page.id)))).save(), `${pdfName.replace(/\.pdf$/i, "")}-part-1.pdf`);
+    downloadPdfBytes(await (await buildPdfFromPages(second, marksForPageIds(second.map((page) => page.id)))).save(), `${pdfName.replace(/\.pdf$/i, "")}-part-2.pdf`);
+  }
+
+  async function runSplitDialog() {
+    try {
+      const groups = getSplitGroups();
+      if (groups.length === 0) {
+        setErrorMessage("The split settings did not produce any output files.");
+        return;
+      }
+      const base = pdfName.replace(/\.pdf$/i, "") || "publish-pro";
+      for (const [index, group] of groups.entries()) {
+        const outputPages = group.map((pageNumber) => pages[pageNumber - 1]).filter(Boolean);
+        if (outputPages.length === 0) continue;
+        const pdf = await buildPdfFromPages(outputPages, marksForPageIds(outputPages.map((page) => page.id)));
+        downloadPdfBytes(await pdf.save(), `${base}-split-${index + 1}.pdf`);
+      }
+      setActivePageDialog(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "The document could not be split.");
+    }
+  }
+
+  function getSplitGroups() {
+    if (splitMode === "afterCurrent") {
+      if (currentPage >= pages.length) throw new Error("Choose a current page before the final page.");
+      return [pages.slice(0, currentPage).map((page) => page.pageNumber), pages.slice(currentPage).map((page) => page.pageNumber)];
+    }
+    if (splitMode === "everyN") {
+      const size = clamp(Math.round(splitEveryN), 1, pages.length);
+      const groups: number[][] = [];
+      for (let index = 0; index < pages.length; index += size) groups.push(pages.slice(index, index + size).map((page) => page.pageNumber));
+      return groups;
+    }
+    if (splitMode === "ranges") return parsePageRanges(splitRanges, pages.length);
+    if (splitMode === "selected") {
+      const selectedPages = pages.filter((page) => getActivePageIds().includes(page.id)).map((page) => page.pageNumber);
+      return selectedPages.length ? [selectedPages] : [];
+    }
+    const boundaryIndexes = pages
+      .map((page, index) => (getActivePageIds().includes(page.id) ? index : -1))
+      .filter((index) => index >= 0)
+      .sort((left, right) => left - right);
+    if (boundaryIndexes.length === 0) return [];
+    const groups: number[][] = [];
+    let start = 0;
+    for (const boundary of boundaryIndexes) {
+      if (boundary >= start) {
+        groups.push(pages.slice(start, boundary + 1).map((page) => page.pageNumber));
+        start = boundary + 1;
+      }
+    }
+    if (start < pages.length) groups.push(pages.slice(start).map((page) => page.pageNumber));
+    return groups.filter((group) => group.length > 0);
   }
 
   function updateSelectedPageLabel(label: string) {
     const activeIds = getActivePageIds();
     const nextPages = pages.map((page) => (activeIds.includes(page.id) ? { ...page, label: label.trim() || undefined } : page));
     commitDocument(nextPages, marks, selectedMark, currentPage, activeIds);
+  }
+
+  function applyLabelPattern() {
+    const activeIds = getActivePageIds();
+    const selectedPages = pages.filter((page) => activeIds.includes(page.id));
+    if (selectedPages.length === 0) return;
+    const nextPages = pages.map((page) => {
+      const index = selectedPages.findIndex((item) => item.id === page.id);
+      if (index < 0) return page;
+      return {
+        ...page,
+        label: `${labelPrefix}${formatSequenceValue(labelStart + index, labelFormat, labelPadding)}${labelSuffix}` || undefined,
+      };
+    });
+    commitDocument(nextPages, marks, selectedMark, currentPage, activeIds);
+    setActivePageDialog(null);
   }
 
   function startPageDrag(page: PageView) {
@@ -1218,7 +1627,7 @@ export function App() {
     const targetIndexInRemaining = remaining.findIndex((page) => page.id === targetPage.id);
     const insertIndex = pageDropPosition === "before" ? targetIndexInRemaining : targetIndexInRemaining + 1;
     const nextPages = renumberPages([...remaining.slice(0, insertIndex), ...moving, ...remaining.slice(insertIndex)]);
-    const nextMarks = remapMarksForPages(marks, pages, nextPages);
+    const nextMarks = marks;
     const firstMoved = moving[0];
     const nextCurrentPage = firstMoved ? nextPages.find((page) => page.id === firstMoved.id)?.pageNumber ?? currentPage : currentPage;
     commitDocument(nextPages, nextMarks, selectedMark, nextCurrentPage, moving.map((page) => page.id));
@@ -1239,9 +1648,10 @@ export function App() {
     pagesBefore = pages,
     marksBefore = marks
   ) {
+    const normalizedNextMarks = syncMarksToPages(migrateMarksToPageIds(nextMarks, pagesBefore), nextPages);
     if (
       arePagesEqual(pagesBefore, nextPages) &&
-      areMarksEqual(marksBefore, nextMarks) &&
+      areMarksEqual(marksBefore, normalizedNextMarks) &&
       selectedMark === nextSelectedMark &&
       currentPage === nextCurrentPage &&
       arraysEqual(selectedPageIds, nextSelectedPageIds)
@@ -1256,7 +1666,7 @@ export function App() {
           pagesBefore,
           pagesAfter: nextPages,
           marksBefore,
-          marksAfter: nextMarks,
+          marksAfter: normalizedNextMarks,
           selectedBefore: selectedMark,
           selectedAfter: nextSelectedMark,
           currentPageBefore: currentPage,
@@ -1268,7 +1678,7 @@ export function App() {
       future: [],
     }));
     setPages(nextPages);
-    setMarks(nextMarks);
+    setMarks(normalizedNextMarks);
     setSelectedMark(nextSelectedMark);
     setCurrentPage(nextCurrentPage);
     setSelectedPageIds(nextSelectedPageIds);
@@ -1364,13 +1774,14 @@ export function App() {
       }
     }
 
-    const pageNumberToExportIndex = new Map(exportPages.map((page, index) => [page.pageNumber, index]));
+    const pageIdToExportIndex = new Map(exportPages.map((page, index) => [page.id, index]));
     for (const [index, mark] of exportMarks.entries()) {
       onProgress?.("Applying annotations", 30 + (index / Math.max(1, exportMarks.length)) * 55);
-      const exportIndex = pageNumberToExportIndex.get(mark.page);
+      const exportPageId = markPageId(mark, exportPages);
+      const exportIndex = exportPageId ? pageIdToExportIndex.get(exportPageId) : undefined;
       if (exportIndex === undefined) continue;
       const page = exportedPdf.getPage(exportIndex);
-      const sourcePage = exportPages.find((item) => item.pageNumber === mark.page);
+      const sourcePage = exportPages[exportIndex];
       if (!sourcePage) continue;
 
       const { width, height } = page.getSize();
@@ -1601,6 +2012,168 @@ export function App() {
       <input className="hidden-file-input" ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
       <input className="hidden-file-input" ref={signatureInput} type="file" accept="image/png" onChange={handleSignatureUpload} aria-label="Choose PNG signature file" />
 
+      {pageContextMenu ? (
+        <div className="page-context-menu" role="menu" style={{ left: pageContextMenu.x, top: pageContextMenu.y }} aria-label="Page actions">
+          <button role="menuitem" onClick={() => runPageMenuAction(() => { setActivePageDialog("blank"); })}>Insert Blank Page Before</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => { setActivePageDialog("blank"); })}>Insert Blank Page After</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => { setMergeInsertPosition("before"); setActivePageDialog("merge"); })}>Import PDF Before</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => { setMergeInsertPosition("after"); setActivePageDialog("merge"); })}>Import PDF After</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(duplicateSelectedPages)}>Duplicate</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(copySelectedPages)}>Copy</button>
+          <button role="menuitem" disabled={!copiedPages} onClick={() => runPageMenuAction(() => pasteCopiedPages("before"))}>Paste Before</button>
+          <button role="menuitem" disabled={!copiedPages} onClick={() => runPageMenuAction(() => pasteCopiedPages("after"))}>Paste After</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => rotateSelectedPages(-90))}>Rotate Left</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => rotateSelectedPages(90))}>Rotate Right</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => { setActivePageDialog("replace"); })}>Replace Page</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => { setActivePageDialog("extract"); })}>Extract Selected Pages</button>
+          <button role="menuitem" disabled={currentPage >= pages.length} onClick={() => runPageMenuAction(() => splitAfterCurrentPage())}>Split After This Page</button>
+          <button role="menuitem" onClick={() => runPageMenuAction(() => { setActivePageDialog("labels"); })}>Edit Page Label</button>
+          <button role="menuitem" className="danger" onClick={() => runPageMenuAction(deleteSelectedPages)}>Delete</button>
+        </div>
+      ) : null}
+
+      {activePageDialog ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-card" role="dialog" aria-modal="true" aria-label="Page management dialog">
+            <div className="modal-header">
+              <h2>{getPageDialogTitle(activePageDialog)}</h2>
+              <button className="panel-icon-button" onClick={() => setActivePageDialog(null)} aria-label="Close dialog" title="Close dialog">x</button>
+            </div>
+
+            {activePageDialog === "merge" ? (
+              <div className="dialog-body">
+                <label className="file-picker">
+                  Add PDF files
+                  <input type="file" accept="application/pdf" multiple onChange={(event) => void addFilesToMergeQueue(Array.from(event.currentTarget.files ?? []))} />
+                </label>
+                <label>
+                  Insert position
+                  <select value={mergeInsertPosition} onChange={(event) => setMergeInsertPosition(event.currentTarget.value as InsertPosition)}>
+                    <option value="start">Beginning</option>
+                    <option value="before">Before current page</option>
+                    <option value="after">After current page</option>
+                    <option value="end">End</option>
+                  </select>
+                </label>
+                <div className="merge-queue">
+                  {mergeQueue.map((item, index) => (
+                    <div className={`merge-item ${item.error ? "invalid" : ""}`} key={item.id}>
+                      <strong>{item.name}</strong>
+                      <span>{item.error ?? `${item.pageCount} pages`}</span>
+                      <label>
+                        Pages
+                        <input value={item.range} onChange={(event) => updateMergeQueueItem(item.id, { range: event.currentTarget.value })} disabled={Boolean(item.error)} />
+                      </label>
+                      <div className="dialog-actions compact">
+                        <button className="button ghost" onClick={() => moveMergeQueueItem(item.id, -1)} disabled={index === 0}>Up</button>
+                        <button className="button ghost" onClick={() => moveMergeQueueItem(item.id, 1)} disabled={index === mergeQueue.length - 1}>Down</button>
+                        <button className="button ghost" onClick={() => removeMergeQueueItem(item.id)}>Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                  {mergeQueue.length === 0 ? <p className="dialog-note">No files selected.</p> : null}
+                </div>
+                <p className="dialog-note">{mergeQueue.filter((item) => !item.error).reduce((total, item) => total + safeRangeCount(item.range, item.pageCount), 0)} pages ready to insert.</p>
+                <div className="dialog-actions">
+                  <button className="button ghost" onClick={() => setActivePageDialog(null)}>Cancel</button>
+                  <button className="button primary" onClick={() => void importMergeQueue()} disabled={!mergeQueue.some((item) => !item.error)}>Import PDFs</button>
+                </div>
+              </div>
+            ) : null}
+
+            {activePageDialog === "blank" ? (
+              <div className="dialog-body">
+                <label>
+                  Preset
+                  <select value={blankPagePreset} onChange={(event) => setBlankPagePreset(event.currentTarget.value as BlankPagePreset)}>
+                    <option value="matchCurrent">Match current page</option>
+                    <option value="a4Portrait">A4</option>
+                    <option value="a3Portrait">A3</option>
+                    <option value="letterPortrait">Letter</option>
+                    <option value="legalPortrait">Legal</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label>
+                  Orientation
+                  <select value={blankPageOrientation} onChange={(event) => setBlankPageOrientation(event.currentTarget.value as PageOrientation)}>
+                    <option value="portrait">Portrait</option>
+                    <option value="landscape">Landscape</option>
+                  </select>
+                </label>
+                <div className="page-field-grid">
+                  <label>Width<input type="number" value={customPageWidth} onChange={(event) => setCustomPageWidth(Number(event.currentTarget.value))} disabled={blankPagePreset !== "custom"} /></label>
+                  <label>Height<input type="number" value={customPageHeight} onChange={(event) => setCustomPageHeight(Number(event.currentTarget.value))} disabled={blankPagePreset !== "custom"} /></label>
+                </div>
+                <label>
+                  Units
+                  <select value={blankPageUnit} onChange={(event) => setBlankPageUnit(event.currentTarget.value as DimensionUnit)} disabled={blankPagePreset !== "custom"}>
+                    <option value="mm">Millimetres</option>
+                    <option value="cm">Centimetres</option>
+                    <option value="in">Inches</option>
+                    <option value="pt">Points</option>
+                  </select>
+                </label>
+                <div className="page-field-grid">
+                  <label>Quantity<input type="number" min="1" max="50" value={blankPageQuantity} onChange={(event) => setBlankPageQuantity(Number(event.currentTarget.value))} /></label>
+                  <label>Label<input value={blankPageLabel} onChange={(event) => setBlankPageLabel(event.currentTarget.value)} /></label>
+                </div>
+                <label>Background<input type="color" value={blankPageBackground} onChange={(event) => setBlankPageBackground(event.currentTarget.value)} /></label>
+                <div className="dialog-actions">
+                  <button className="button ghost" onClick={() => setActivePageDialog(null)}>Cancel</button>
+                  <button className="button ghost" onClick={() => { insertBlankPages("before"); setActivePageDialog(null); }}>Insert Before</button>
+                  <button className="button primary" onClick={() => { insertBlankPages("after"); setActivePageDialog(null); }}>Insert After</button>
+                </div>
+              </div>
+            ) : null}
+
+            {activePageDialog === "replace" ? (
+              <div className="dialog-body">
+                <label className="file-picker">Replacement PDF<input type="file" accept="application/pdf" onChange={(event) => void handleReplaceFile(event)} /></label>
+                {replaceFile ? <p className="dialog-note">{replaceFile.name} - {replaceFile.pageCount} pages</p> : null}
+                <label>Source page<input type="number" min="1" max={replaceFile?.pageCount ?? 1} value={replaceSourcePage} onChange={(event) => setReplaceSourcePage(Number(event.currentTarget.value))} /></label>
+                <label className="checkbox-row"><input type="checkbox" checked={replacePreserveAnnotations} onChange={(event) => setReplacePreserveAnnotations(event.currentTarget.checked)} />Preserve existing annotations proportionally</label>
+                {replacePreserveAnnotations ? <p className="dialog-note">If page dimensions differ, annotation coordinates are scaled and clamped to the replacement page.</p> : null}
+                <div className="dialog-actions">
+                  <button className="button ghost" onClick={() => setActivePageDialog(null)}>Cancel</button>
+                  <button className="button primary" onClick={() => void replaceSelectedPage()} disabled={!replaceFile}>Replace Page</button>
+                </div>
+              </div>
+            ) : null}
+
+            {activePageDialog === "split" ? (
+              <div className="dialog-body">
+                <label>Split method<select value={splitMode} onChange={(event) => setSplitMode(event.currentTarget.value as SplitMode)}><option value="afterCurrent">After current page</option><option value="everyN">Every N pages</option><option value="ranges">By page ranges</option><option value="selected">Selected pages only</option><option value="selectedBoundaries">At selected page boundaries</option></select></label>
+                {splitMode === "everyN" ? <label>Pages per file<input type="number" min="1" max={pages.length} value={splitEveryN} onChange={(event) => setSplitEveryN(Number(event.currentTarget.value))} /></label> : null}
+                {splitMode === "ranges" ? <label>Ranges<input value={splitRanges} onChange={(event) => setSplitRanges(event.currentTarget.value)} placeholder="1-5, 8-10" /></label> : null}
+                <p className="dialog-note">Split output uses separate PDF downloads. ZIP packaging is not included yet.</p>
+                <div className="dialog-actions"><button className="button ghost" onClick={() => setActivePageDialog(null)}>Cancel</button><button className="button primary" onClick={() => void runSplitDialog()}>Split PDF</button></div>
+              </div>
+            ) : null}
+
+            {activePageDialog === "extract" ? (
+              <div className="dialog-body">
+                <label>Output filename<input value={extractFilename} onChange={(event) => setExtractFilename(event.currentTarget.value)} placeholder={`${pdfName.replace(/\.pdf$/i, "")}-extract.pdf`} /></label>
+                <label className="checkbox-row"><input type="checkbox" checked={extractDeleteAfter} onChange={(event) => setExtractDeleteAfter(event.currentTarget.checked)} />Delete pages after successful extraction</label>
+                <p className="dialog-note">{activePageIds.length} selected pages will be exported with their annotations and comment summary.</p>
+                <div className="dialog-actions"><button className="button ghost" onClick={() => setActivePageDialog(null)}>Cancel</button><button className="button primary" onClick={() => void runExtractDialog()}>Extract</button></div>
+              </div>
+            ) : null}
+
+            {activePageDialog === "labels" ? (
+              <div className="dialog-body">
+                <label>Prefix<input value={labelPrefix} onChange={(event) => setLabelPrefix(event.currentTarget.value)} placeholder="A-" /></label>
+                <label>Suffix<input value={labelSuffix} onChange={(event) => setLabelSuffix(event.currentTarget.value)} placeholder="" /></label>
+                <div className="page-field-grid"><label>Start<input type="number" value={labelStart} onChange={(event) => setLabelStart(Number(event.currentTarget.value))} /></label><label>Padding<input type="number" min="0" max="6" value={labelPadding} onChange={(event) => setLabelPadding(Number(event.currentTarget.value))} /></label></div>
+                <label>Format<select value={labelFormat} onChange={(event) => setLabelFormat(event.currentTarget.value as "number" | "roman" | "alpha")}><option value="number">Number</option><option value="roman">Roman</option><option value="alpha">Alphabetic</option></select></label>
+                <p className="dialog-note">Page labels are internal Publish Pro metadata and are shown in the workspace and comment exports.</p>
+                <div className="dialog-actions"><button className="button ghost" onClick={() => setActivePageDialog(null)}>Cancel</button><button className="button primary" onClick={applyLabelPattern}>Apply Labels</button></div>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
+
       <nav className="main-toolbar" aria-label="PDF tools">
         <div className="toolbar-group" aria-label="Navigation tools">
           <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
@@ -1686,7 +2259,7 @@ export function App() {
             <div className="panel-header">
               <div>
                 <h2>{getLeftPanelTitle(leftPanel)}</h2>
-                <span>{leftPanel === "pages" ? `${pages.length} pages` : pdfName}</span>
+                <span>{leftPanel === "pages" ? `${pages.length} pages${selectedPageCount > 1 ? ` - ${selectedPageCount} selected` : ""}` : pdfName}</span>
               </div>
               <button className="panel-icon-button" onClick={() => setIsLeftPanelCollapsed(true)} title="Collapse left panel" aria-label="Collapse left panel">
                 <PanelLeftClose size={16} />
@@ -1699,7 +2272,12 @@ export function App() {
                   <Search size={15} />
                   <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find page" aria-label="Find page" />
                 </div>
-                <div className="page-list">
+                <div
+                  className="page-list"
+                  onClick={(event) => {
+                    if (event.target === event.currentTarget) clearPageSelection();
+                  }}
+                >
                   {filteredPages.map((page) => (
                     <button
                       className={`thumb ${currentPage === page.pageNumber ? "current" : ""} ${selectedPageIds.includes(page.id) ? "selected" : ""} ${
@@ -1708,10 +2286,8 @@ export function App() {
                       key={page.id}
                       draggable={!isBusy}
                       onClick={(event) => handlePageSelect(page, event)}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        handlePageSelect(page, event);
-                      }}
+                      onContextMenu={(event) => openPageContextMenu(page, event)}
+                      onKeyDown={(event) => handlePageThumbKeyDown(page, event)}
                       onDragStart={() => startPageDrag(page)}
                       onDragOver={(event) => updatePageDropTarget(page, event)}
                       onDrop={() => finishPageDrop(page)}
@@ -1719,7 +2295,7 @@ export function App() {
                         setDraggedPageIds([]);
                         setPageDropTargetId(null);
                       }}
-                      title={`Page ${page.pageNumber}${page.label ? `: ${page.label}` : ""}`}
+                      title={`Page ${page.pageNumber}${page.label ? `: ${page.label}` : ""} - ${Math.round(page.width / PAGE_SCALE)} x ${Math.round(page.height / PAGE_SCALE)} pt - ${page.width >= page.height ? "Landscape" : "Portrait"}`}
                       aria-label={`Page ${page.pageNumber}${page.label ? `, ${page.label}` : ""}`}
                       aria-current={currentPage === page.pageNumber ? "page" : undefined}
                       aria-pressed={selectedPageIds.includes(page.id)}
@@ -1730,6 +2306,9 @@ export function App() {
                       </div>
                       <span>Page {page.pageNumber}</span>
                       {page.label ? <em className="page-label">{page.label}</em> : null}
+                      <small className="page-meta">
+                        {page.width >= page.height ? "Landscape" : "Portrait"} · {pageAnnotations.get(page.id) ?? 0} marks
+                      </small>
                       {page.rotation ? <small className="page-rotation">{page.rotation}deg</small> : null}
                     </button>
                   ))}
@@ -1747,59 +2326,13 @@ export function App() {
                   </section>
 
                   <section className="page-management-section" aria-label="Add and import pages">
-                    <label>
-                      Blank page
-                      <select value={blankPagePreset} onChange={(event) => setBlankPagePreset(event.target.value as BlankPagePreset)} disabled={isBusy}>
-                        <option value="matchCurrent">Match current page</option>
-                        <option value="a4Portrait">A4 portrait</option>
-                        <option value="a4Landscape">A4 landscape</option>
-                        <option value="a3Portrait">A3 portrait</option>
-                        <option value="a3Landscape">A3 landscape</option>
-                        <option value="letterPortrait">Letter portrait</option>
-                        <option value="letterLandscape">Letter landscape</option>
-                        <option value="legalPortrait">Legal portrait</option>
-                        <option value="legalLandscape">Legal landscape</option>
-                        <option value="custom">Custom points</option>
-                      </select>
-                    </label>
-                    {blankPagePreset === "custom" ? (
-                      <div className="page-field-grid">
-                        <label>
-                          Width
-                          <input type="number" min="72" max="2880" value={customPageWidth} onChange={(event) => setCustomPageWidth(Number(event.target.value))} disabled={isBusy} />
-                        </label>
-                        <label>
-                          Height
-                          <input type="number" min="72" max="2880" value={customPageHeight} onChange={(event) => setCustomPageHeight(Number(event.target.value))} disabled={isBusy} />
-                        </label>
-                      </div>
-                    ) : null}
-                    <div className="page-field-grid">
-                      <label>
-                        Quantity
-                        <input type="number" min="1" max="50" value={blankPageQuantity} onChange={(event) => setBlankPageQuantity(Number(event.target.value))} disabled={isBusy} />
-                      </label>
-                      <label>
-                        Label
-                        <input value={blankPageLabel} onChange={(event) => setBlankPageLabel(event.target.value)} placeholder="Optional" disabled={isBusy} />
-                      </label>
-                    </div>
                     <div className="page-actions">
-                      <button className="button ghost" onClick={() => insertBlankPages("before")} disabled={isBusy} title="Insert blank page before selection" aria-label="Insert blank page before selection">
-                        Before
+                      <button className="button ghost" onClick={() => setActivePageDialog("blank")} disabled={isBusy} title="Open blank page dialog" aria-label="Open blank page dialog">
+                        Blank pages
                       </button>
-                      <button className="button ghost" onClick={() => insertBlankPages("after")} disabled={isBusy} title="Insert blank page after selection" aria-label="Insert blank page after selection">
-                        After
-                      </button>
-                      <button className="button ghost" onClick={() => insertBlankPages("start")} disabled={isBusy} title="Insert blank page at document start" aria-label="Insert blank page at document start">
-                        Start
-                      </button>
-                      <button className="button ghost" onClick={() => insertBlankPages("end")} disabled={isBusy} title="Insert blank page at document end" aria-label="Insert blank page at document end">
-                        End
-                      </button>
-                      <button className="button ghost" onClick={() => importPdfInput.current?.click()} disabled={isBusy} title="Import PDF files" aria-label="Import PDF files">
+                      <button className="button ghost" onClick={() => setActivePageDialog("merge")} disabled={isBusy} title="Combine PDF files" aria-label="Combine PDF files">
                         <Files size={15} />
-                        Import
+                        Combine
                       </button>
                     </div>
                   </section>
@@ -1820,6 +2353,12 @@ export function App() {
                       <button className="button ghost" onClick={() => void rotateSelectedPages(-90)} disabled={isBusy} title="Rotate selected pages counter-clockwise" aria-label="Rotate selected pages counter-clockwise">
                         Rotate CCW
                       </button>
+                      <button className="button ghost" onClick={() => void rotateSelectedPages(180)} disabled={isBusy} title="Rotate selected pages 180 degrees" aria-label="Rotate selected pages 180 degrees">
+                        180
+                      </button>
+                      <button className="button ghost" onClick={() => setActivePageDialog("replace")} disabled={isBusy} title="Replace selected page" aria-label="Replace selected page">
+                        Replace
+                      </button>
                     </div>
                   </section>
 
@@ -1831,13 +2370,10 @@ export function App() {
                       <button className="button ghost" onClick={() => pasteCopiedPages("after")} disabled={isBusy || !copiedPages} title="Paste copied pages after selection" aria-label="Paste copied pages after selection">
                         Paste
                       </button>
-                      <button className="button ghost" onClick={() => void extractSelectedPages(false)} disabled={isBusy} title="Extract selected pages as a PDF" aria-label="Extract selected pages as a PDF">
+                      <button className="button ghost" onClick={() => setActivePageDialog("extract")} disabled={isBusy} title="Extract selected pages as a PDF" aria-label="Extract selected pages as a PDF">
                         Extract
                       </button>
-                      <button className="button ghost" onClick={() => void extractSelectedPages(true)} disabled={isBusy || pages.length <= 1} title="Extract selected pages and remove them" aria-label="Extract selected pages and remove them">
-                        Extract/remove
-                      </button>
-                      <button className="button ghost" onClick={() => void splitAfterCurrentPage()} disabled={isBusy || currentPage >= pages.length} title="Split document after current page" aria-label="Split document after current page">
+                      <button className="button ghost" onClick={() => setActivePageDialog("split")} disabled={isBusy || pages.length <= 1} title="Open split PDF dialog" aria-label="Open split PDF dialog">
                         Split
                       </button>
                     </div>
@@ -1853,6 +2389,9 @@ export function App() {
                         disabled={isBusy}
                       />
                     </label>
+                    <button className="button ghost" onClick={() => setActivePageDialog("labels")} disabled={isBusy} title="Apply label pattern" aria-label="Apply label pattern">
+                      Pattern
+                    </button>
                   </section>
                 </div>
               </>
@@ -1945,7 +2484,7 @@ export function App() {
                 <DocumentPage
                   key={page.pageNumber}
                   page={page}
-                  marks={marks.filter((mark) => mark.page === page.pageNumber)}
+                  marks={marks.filter((mark) => markBelongsToPage(mark, page))}
                   zoom={zoom}
                   selectedMark={selectedMark}
                   activeTool={activeTool}
@@ -4046,6 +4585,24 @@ function multiplyMatrix(left: number[], right: number[]) {
   ];
 }
 
+function getPageDialogTitle(dialog: PageDialog) {
+  if (dialog === "blank") return "Insert Blank Pages";
+  if (dialog === "merge") return "Combine PDF Files";
+  if (dialog === "replace") return "Replace Page";
+  if (dialog === "split") return "Split PDF";
+  if (dialog === "extract") return "Extract Pages";
+  if (dialog === "labels") return "Page Labels";
+  return "Page Management";
+}
+
+function safeRangeCount(range: string, pageCount: number) {
+  try {
+    return parsePageRanges(range || `1-${pageCount}`, pageCount).flat().length;
+  } catch {
+    return 0;
+  }
+}
+
 function getMarkupToolLabel(kind: TextMarkupKind) {
   if (kind === "textHighlight") return "Text highlight";
   if (kind === "underline") return "Underline";
@@ -4253,6 +4810,135 @@ function renumberPages(pages: PageView[]) {
   return pages.map((page, index) => ({ ...page, pageNumber: index + 1 }));
 }
 
+function migrateMarksToPageIds(marks: Mark[], pages: PageView[]) {
+  const pageByNumber = new Map(pages.map((page) => [page.pageNumber, page]));
+  const validPageIds = new Set(pages.map((page) => page.id));
+  return marks.map((mark) => {
+    if (mark.pageId && validPageIds.has(mark.pageId)) return mark;
+    const page = pageByNumber.get(mark.page);
+    return page ? { ...mark, pageId: page.id } : mark;
+  });
+}
+
+function syncMarksToPages(marks: Mark[], pages: PageView[]) {
+  const pageNumberById = new Map(pages.map((page) => [page.id, page.pageNumber]));
+  return marks.map((mark) => {
+    if (!mark.pageId) return mark;
+    const pageNumber = pageNumberById.get(mark.pageId);
+    return pageNumber ? { ...mark, page: pageNumber } : mark;
+  });
+}
+
+function scaleMarksForReplacement(marks: Mark[], oldPage: PageView, nextPage: PageView) {
+  const scaleX = nextPage.width / oldPage.width;
+  const scaleY = nextPage.height / oldPage.height;
+  return marks.map((mark) => {
+    if ((mark.pageId ?? (mark.page === oldPage.pageNumber ? oldPage.id : undefined)) !== oldPage.id) return mark;
+    return clampMarkToPage(
+      {
+        ...mark,
+        pageId: oldPage.id,
+        x: mark.x * scaleX,
+        y: mark.y * scaleY,
+        width: mark.width * scaleX,
+        height: mark.height * scaleY,
+        markupRects: mark.markupRects?.map((rect) => ({
+          x: rect.x * scaleX,
+          y: rect.y * scaleY,
+          width: rect.width * scaleX,
+          height: rect.height * scaleY,
+        })),
+        strokePoints: mark.strokePoints?.map((point) => ({ x: point.x * scaleX, y: point.y * scaleY })),
+      },
+      [nextPage]
+    );
+  });
+}
+
+function countAnnotationsByPageId(marks: Mark[], pages: PageView[]) {
+  const pageIdByNumber = new Map(pages.map((page) => [page.pageNumber, page.id]));
+  const counts = new Map<string, number>();
+  for (const mark of marks) {
+    const pageId = mark.pageId ?? pageIdByNumber.get(mark.page);
+    if (!pageId) continue;
+    counts.set(pageId, (counts.get(pageId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function parsePageRanges(input: string, pageCount: number) {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error("Enter a page range.");
+  const seen = new Set<number>();
+  const ranges = trimmed.split(",").map((part) => part.trim()).filter(Boolean);
+  if (ranges.length === 0) throw new Error("Enter a page range.");
+  return ranges.map((range) => {
+    const match = range.match(/^(\d+)(?:-(\d+))?$/);
+    if (!match) throw new Error(`Invalid page range: ${range}`);
+    const start = Number(match[1]);
+    const end = Number(match[2] ?? match[1]);
+    if (start < 1 || end < 1 || start > pageCount || end > pageCount || start > end) throw new Error(`Page range is out of bounds: ${range}`);
+    const values: number[] = [];
+    for (let page = start; page <= end; page += 1) {
+      if (seen.has(page)) throw new Error(`Overlapping page range includes page ${page}.`);
+      seen.add(page);
+      values.push(page);
+    }
+    return values;
+  });
+}
+
+function formatSequenceValue(value: number, format: "number" | "roman" | "alpha", padding: number) {
+  if (format === "roman") return toRoman(value).toLowerCase();
+  if (format === "alpha") return toAlpha(value);
+  return String(value).padStart(Math.max(0, padding), "0");
+}
+
+function toRoman(value: number) {
+  const pairs: Array<[number, string]> = [
+    [1000, "M"],
+    [900, "CM"],
+    [500, "D"],
+    [400, "CD"],
+    [100, "C"],
+    [90, "XC"],
+    [50, "L"],
+    [40, "XL"],
+    [10, "X"],
+    [9, "IX"],
+    [5, "V"],
+    [4, "IV"],
+    [1, "I"],
+  ];
+  let remaining = Math.max(1, Math.floor(value));
+  let output = "";
+  for (const [amount, symbol] of pairs) {
+    while (remaining >= amount) {
+      output += symbol;
+      remaining -= amount;
+    }
+  }
+  return output;
+}
+
+function toAlpha(value: number) {
+  let remaining = Math.max(1, Math.floor(value));
+  let output = "";
+  while (remaining > 0) {
+    remaining -= 1;
+    output = String.fromCharCode(65 + (remaining % 26)) + output;
+    remaining = Math.floor(remaining / 26);
+  }
+  return output;
+}
+
+function dimensionToPoints(value: number, unit: DimensionUnit) {
+  if (unit === "in") return value * 72;
+  if (unit === "mm") return (value / 25.4) * 72;
+  if (unit === "cm") return (value / 2.54) * 72;
+  return value;
+}
+
 function remapMarksForPages(marks: Mark[], oldPages: PageView[], nextPages: PageView[]) {
   const pageIdByOldNumber = new Map(oldPages.map((page) => [page.pageNumber, page.id]));
   const pageNumberById = new Map(nextPages.map((page) => [page.id, page.pageNumber]));
@@ -4298,11 +4984,11 @@ function getBlankPageSize(preset: BlankPagePreset) {
   return sizes[preset];
 }
 
-async function rotatePageView(page: PageView, delta: 90 | -90): Promise<PageView> {
+async function rotatePageView(page: PageView, delta: 90 | -90 | 180): Promise<PageView> {
   const rotated = {
     ...page,
-    width: page.height,
-    height: page.width,
+    width: delta === 180 ? page.width : page.height,
+    height: delta === 180 ? page.height : page.width,
     rotation: normalizePageRotation(page.rotation + delta),
     textItems: page.textItems.map((item) => rotateRectForPage(item, page, delta)),
   };
@@ -4313,11 +4999,15 @@ async function rotatePageView(page: PageView, delta: 90 | -90): Promise<PageView
   };
 }
 
-function rotateMarkForPage(mark: Mark, page: PageView, delta: 90 | -90): Mark {
+function rotateMarkForPage(mark: Mark, page: PageView, delta: 90 | -90 | 180): Mark {
   const rotated = rotateRectForPage(mark, page, delta);
   const markupRects = mark.markupRects?.map((rect) => rotateRectForPage(rect, page, delta));
   const strokePoints = mark.strokePoints?.map((point) =>
-    delta === 90 ? { x: page.height - point.y, y: point.x } : { x: point.y, y: page.width - point.x }
+    delta === 180
+      ? { x: page.width - point.x, y: page.height - point.y }
+      : delta === 90
+      ? { x: page.height - point.y, y: point.x }
+      : { x: point.y, y: page.width - point.x }
   );
   return {
     ...mark,
@@ -4328,26 +5018,32 @@ function rotateMarkForPage(mark: Mark, page: PageView, delta: 90 | -90): Mark {
   };
 }
 
-function rotateRectForPage<T extends { x: number; y: number; width: number; height: number }>(rect: T, page: PageView, delta: 90 | -90): T {
+function rotateRectForPage<T extends { x: number; y: number; width: number; height: number }>(rect: T, page: PageView, delta: 90 | -90 | 180): T {
+  if (delta === 180) {
+    return { ...rect, x: page.width - (rect.x + rect.width), y: page.height - (rect.y + rect.height) };
+  }
   if (delta === 90) {
     return { ...rect, x: page.height - (rect.y + rect.height), y: rect.x, width: rect.height, height: rect.width };
   }
   return { ...rect, x: rect.y, y: page.width - (rect.x + rect.width), width: rect.height, height: rect.width };
 }
 
-function rotateImageDataUrl(dataUrl: string, width: number, height: number, delta: 90 | -90) {
+function rotateImageDataUrl(dataUrl: string, width: number, height: number, delta: 90 | -90 | 180) {
   return new Promise<string>((resolve, reject) => {
     const image = new Image();
     image.onload = () => {
       const canvas = document.createElement("canvas");
-      canvas.width = Math.round(height);
-      canvas.height = Math.round(width);
+      canvas.width = Math.round(delta === 180 ? width : height);
+      canvas.height = Math.round(delta === 180 ? height : width);
       const context = canvas.getContext("2d");
       if (!context) {
         reject(new Error("Could not rotate page image."));
         return;
       }
-      if (delta === 90) {
+      if (delta === 180) {
+        context.translate(canvas.width, canvas.height);
+        context.rotate(Math.PI);
+      } else if (delta === 90) {
         context.translate(canvas.width, 0);
         context.rotate(Math.PI / 2);
       } else {
