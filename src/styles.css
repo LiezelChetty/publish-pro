@@ -3937,3 +3937,14 @@ body {
 :root[data-theme="dark"] .thumb.selected {
   box-shadow: inset 2px 0 0 var(--accent);
 }
+
+.document-page .mark-text,
+.document-page .mark-text .text-box-preview,
+.document-page .mark-text .text-box-editor {
+  background: transparent;
+}
+
+.document-page .mark-text .text-box-editor {
+  border: 0;
+  color: inherit;
+}
