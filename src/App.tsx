@@ -6,10 +6,12 @@ import {
   MousePointer2,
   PenLine,
   Plus,
+  Redo2,
   Search,
   Stamp,
   TextCursorInput,
   Trash2,
+  Undo2,
   Upload,
   ZoomIn,
   ZoomOut,
@@ -46,6 +48,18 @@ type Mark = {
   size: number;
 };
 
+type HistoryEntry = {
+  before: Mark[];
+  after: Mark[];
+  selectedBefore: string | null;
+  selectedAfter: string | null;
+};
+
+type HistoryState = {
+  past: HistoryEntry[];
+  future: HistoryEntry[];
+};
+
 type PageView = {
   pageNumber: number;
   sourcePageNumber?: number;
@@ -55,6 +69,7 @@ type PageView = {
 };
 
 const PAGE_SCALE = 1.35;
+const MAX_HISTORY_ENTRIES = 100;
 const BRAND_RED = "#d8342a";
 const BRAND_ICON_SRC = "/brand/publish-pro-icon.svg";
 const BRAND_LOGO_SRC = "/brand/publish-pro-logo.svg";
@@ -102,6 +117,7 @@ export function App() {
   const [pages, setPages] = useState<PageView[]>(demoPages);
   const [currentPage, setCurrentPage] = useState(1);
   const [marks, setMarks] = useState<Mark[]>(initialMarks);
+  const [history, setHistory] = useState<HistoryState>({ past: [], future: [] });
   const [activeTool, setActiveTool] = useState<Tool>("select");
   const [selectedMark, setSelectedMark] = useState<string | null>("demo-title");
   const [zoom, setZoom] = useState(1);
@@ -113,11 +129,40 @@ export function App() {
 
   const selected = marks.find((mark) => mark.id === selectedMark) ?? null;
   const isBusy = workState !== null;
+  const canUndo = history.past.length > 0 && !isBusy;
+  const canRedo = history.future.length > 0 && !isBusy;
   const filteredPages = useMemo(() => {
     if (!query.trim()) return pages;
     const normalized = query.trim().toLowerCase();
     return pages.filter((page) => String(page.pageNumber).includes(normalized));
   }, [pages, query]);
+
+  useEffect(() => {
+    function handleKeyboardShortcut(event: KeyboardEvent) {
+      const isModifierPressed = event.metaKey || event.ctrlKey;
+      if (!isModifierPressed || isBusy) return;
+
+      const key = event.key.toLowerCase();
+      const isUndo = key === "z" && !event.shiftKey;
+      const isRedo = (key === "z" && event.shiftKey) || key === "y";
+
+      if (isUndo && history.past.length > 0) {
+        event.preventDefault();
+        undo();
+      }
+
+      if (isRedo && history.future.length > 0) {
+        event.preventDefault();
+        redo();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyboardShortcut);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyboardShortcut);
+    };
+  }, [history, isBusy]);
 
   useEffect(() => {
     if (!pdfDoc) return;
@@ -201,6 +246,7 @@ export function App() {
       setPdfBytes(bytes);
       setPdfDoc(loaded);
       setMarks([]);
+      setHistory({ past: [], future: [] });
       setSelectedMark(null);
     } catch (error) {
       setWorkState(null);
@@ -252,19 +298,27 @@ export function App() {
       size: activeTool === "text" ? 18 : 16,
     };
 
-    setMarks((existing) => [...existing, mark]);
-    setSelectedMark(mark.id);
+    commitMarks([...marks, mark], mark.id);
     setActiveTool("select");
   }
 
   function updateMark(id: string, patch: Partial<Mark>) {
-    setMarks((existing) => existing.map((mark) => (mark.id === id ? { ...mark, ...patch } : mark)));
+    commitMarks(marks.map((mark) => (mark.id === id ? clampMarkToPage({ ...mark, ...patch }, pages) : mark)), selectedMark);
+  }
+
+  function previewMark(id: string, patch: Partial<Mark>) {
+    setMarks((existing) => existing.map((mark) => (mark.id === id ? clampMarkToPage({ ...mark, ...patch }, pages) : mark)));
+  }
+
+  function commitMarkChange(beforeMark: Mark, afterMark: Mark) {
+    const nextMarks = marks.map((mark) => (mark.id === afterMark.id ? clampMarkToPage(afterMark, pages) : mark));
+    const beforeMarks = marks.map((mark) => (mark.id === beforeMark.id ? beforeMark : mark));
+    commitMarks(nextMarks, selectedMark, beforeMarks);
   }
 
   function removeSelectedMark() {
     if (!selectedMark) return;
-    setMarks((existing) => existing.filter((mark) => mark.id !== selectedMark));
-    setSelectedMark(null);
+    commitMarks(marks.filter((mark) => mark.id !== selectedMark), null);
   }
 
   function duplicatePage() {
@@ -273,13 +327,55 @@ export function App() {
 
     const nextNumber = pages.length + 1;
     setPages((existing) => [...existing, { ...sourcePage, pageNumber: nextNumber }]);
-    setMarks((existing) => [
-      ...existing,
-      ...existing
+    const nextMarks = [
+      ...marks,
+      ...marks
         .filter((mark) => mark.page === currentPage)
         .map((mark) => ({ ...mark, id: crypto.randomUUID(), page: nextNumber })),
-    ]);
+    ];
+    commitMarks(nextMarks, selectedMark);
     setCurrentPage(nextNumber);
+  }
+
+  function commitMarks(nextMarks: Mark[], nextSelectedMark: string | null, historyBefore = marks) {
+    if (areMarksEqual(historyBefore, nextMarks) && selectedMark === nextSelectedMark) return;
+
+    setHistory((existing) => ({
+      past: [...existing.past.slice(-(MAX_HISTORY_ENTRIES - 1)), { before: historyBefore, after: nextMarks, selectedBefore: selectedMark, selectedAfter: nextSelectedMark }],
+      future: [],
+    }));
+    setMarks(nextMarks);
+    setSelectedMark(nextSelectedMark);
+  }
+
+  function undo() {
+    setHistory((existing) => {
+      const entry = existing.past[existing.past.length - 1];
+      if (!entry) return existing;
+
+      setMarks(entry.before);
+      setSelectedMark(entry.selectedBefore);
+
+      return {
+        past: existing.past.slice(0, -1),
+        future: [entry, ...existing.future],
+      };
+    });
+  }
+
+  function redo() {
+    setHistory((existing) => {
+      const entry = existing.future[0];
+      if (!entry) return existing;
+
+      setMarks(entry.after);
+      setSelectedMark(entry.selectedAfter);
+
+      return {
+        past: [...existing.past, entry].slice(-MAX_HISTORY_ENTRIES),
+        future: existing.future.slice(1),
+      };
+    });
   }
 
   async function exportPdf() {
@@ -439,6 +535,9 @@ export function App() {
             <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
             <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
             <div className="tool-divider" />
+            <ToolButton icon={<Undo2 />} label="Undo" onClick={undo} disabled={!canUndo} />
+            <ToolButton icon={<Redo2 />} label="Redo" onClick={redo} disabled={!canRedo} />
+            <div className="tool-divider" />
             <ToolButton icon={<Trash2 />} label="Delete selected annotation" onClick={removeSelectedMark} disabled={!selectedMark || isBusy} />
             <div className="tool-divider" />
             <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} />
@@ -478,7 +577,8 @@ export function App() {
                   selectedMark={selectedMark}
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
-                  onUpdateMark={updateMark}
+                  onPreviewMark={previewMark}
+                  onCommitMarkChange={commitMarkChange}
                 />
               ))}
           </div>
@@ -568,7 +668,8 @@ function DocumentPage({
   selectedMark,
   onSelect,
   onAddMark,
-  onUpdateMark,
+  onPreviewMark,
+  onCommitMarkChange,
 }: {
   page: PageView;
   marks: Mark[];
@@ -576,10 +677,11 @@ function DocumentPage({
   selectedMark: string | null;
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
-  onUpdateMark: (id: string, patch: Partial<Mark>) => void;
+  onPreviewMark: (id: string, patch: Partial<Mark>) => void;
+  onCommitMarkChange: (beforeMark: Mark, afterMark: Mark) => void;
 }) {
   const pageRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ id: string; startX: number; startY: number; markX: number; markY: number } | null>(null);
+  const dragRef = useRef<{ before: Mark; latest: Mark; startX: number; startY: number } | null>(null);
 
   function pagePoint(event: PointerEvent<HTMLDivElement>) {
     const bounds = pageRef.current?.getBoundingClientRect();
@@ -604,20 +706,34 @@ function DocumentPage({
           onPointerMove={(event) => {
             const drag = dragRef.current;
             if (!drag) return;
-            const activeMark = marks.find((mark) => mark.id === drag.id);
+            const activeMark = marks.find((mark) => mark.id === drag.before.id);
             if (!activeMark) return;
             const dx = (event.clientX - drag.startX) / zoom;
             const dy = (event.clientY - drag.startY) / zoom;
-            onUpdateMark(drag.id, {
-              x: clamp(drag.markX + dx, 0, Math.max(0, page.width - activeMark.width)),
-              y: clamp(drag.markY + dy, 0, Math.max(0, page.height - activeMark.height)),
-            });
+            const latest = clampMarkToPage(
+              {
+                ...activeMark,
+                x: drag.before.x + dx,
+                y: drag.before.y + dy,
+              },
+              [page]
+            );
+            dragRef.current = { ...drag, latest };
+            onPreviewMark(activeMark.id, latest);
           }}
       onPointerUp={() => {
+        const drag = dragRef.current;
         dragRef.current = null;
+        if (drag && !areMarksEqual([drag.before], [drag.latest])) {
+          onCommitMarkChange(drag.before, drag.latest);
+        }
       }}
       onPointerLeave={() => {
+        const drag = dragRef.current;
         dragRef.current = null;
+        if (drag && !areMarksEqual([drag.before], [drag.latest])) {
+          onCommitMarkChange(drag.before, drag.latest);
+        }
       }}
     >
       {page.imageUrl ? <img className="pdf-image" src={page.imageUrl} alt={`Page ${page.pageNumber}`} /> : <BlankPage />}
@@ -640,11 +756,10 @@ function DocumentPage({
             event.stopPropagation();
             onSelect(mark.id);
             dragRef.current = {
-              id: mark.id,
+              before: mark,
+              latest: mark,
               startX: event.clientX,
               startY: event.clientY,
-              markX: mark.x,
-              markY: mark.y,
             };
           }}
         >
@@ -719,6 +834,40 @@ function hexToRgba(hex: string, alpha: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function clampMarkToPage(mark: Mark, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
+  const page = pages.find((item) => item.pageNumber === mark.page);
+  if (!page) return mark;
+
+  return {
+    ...mark,
+    width: Math.max(1, mark.width),
+    height: Math.max(1, mark.height),
+    x: clamp(mark.x, 0, Math.max(0, page.width - mark.width)),
+    y: clamp(mark.y, 0, Math.max(0, page.height - mark.height)),
+  };
+}
+
+function areMarksEqual(left: Mark[], right: Mark[]) {
+  if (left.length !== right.length) return false;
+
+  return left.every((mark, index) => {
+    const other = right[index];
+    return (
+      other !== undefined &&
+      mark.id === other.id &&
+      mark.kind === other.kind &&
+      mark.page === other.page &&
+      mark.x === other.x &&
+      mark.y === other.y &&
+      mark.width === other.width &&
+      mark.height === other.height &&
+      mark.text === other.text &&
+      mark.color === other.color &&
+      mark.size === other.size
+    );
+  });
 }
 
 function getMarkLabel(mark: Mark) {
