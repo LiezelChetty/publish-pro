@@ -1,8 +1,10 @@
 import {
+  CheckCircle2,
   Download,
   FilePlus2,
   Highlighter,
   Image as ImageIcon,
+  MessageSquare,
   MousePointer2,
   PenLine,
   Pencil,
@@ -19,7 +21,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { degrees, PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import { degrees, PDFDocument, rgb, StandardFonts, type PDFFont } from "pdf-lib";
 import {
   GlobalWorkerOptions,
   getDocument,
@@ -28,6 +30,17 @@ import {
 } from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { ChangeEvent, PointerEvent, ReactElement, useEffect, useMemo, useRef, useState } from "react";
+import {
+  commentMatchesFilter,
+  createCommentData,
+  createCommentReply,
+  formatCommentDate,
+  getCommentPreview,
+  wrapText,
+  type CommentData,
+  type CommentReply,
+  type CommentStatusFilter,
+} from "./comments";
 import {
   getMarkupBounds,
   isTextMarkupKind,
@@ -40,8 +53,8 @@ import {
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | TextMarkupKind;
-type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | TextMarkupKind;
+type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | TextMarkupKind;
+type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | "comment" | TextMarkupKind;
 type WorkState = {
   message: string;
   progress?: number;
@@ -91,6 +104,7 @@ type Mark = {
   thickness?: number;
   lockAspectRatio?: boolean;
   markupRects?: MarkupRect[];
+  comment?: CommentData;
   strokePoints?: StrokePoint[];
   strokeOpacity?: number;
 };
@@ -121,6 +135,7 @@ const MAX_HISTORY_ENTRIES = 100;
 const BRAND_RED = "#d8342a";
 const BRAND_ICON_SRC = "/brand/publish-pro-icon.svg";
 const BRAND_LOGO_SRC = "/brand/publish-pro-logo.svg";
+const COMMENT_MARKER_SIZE = 32;
 
 const demoPages: PageView[] = [
   {
@@ -176,6 +191,11 @@ export function App() {
   const [pendingSignature, setPendingSignature] = useState<PreparedImage | null>(null);
   const [copiedMark, setCopiedMark] = useState<Mark | null>(null);
   const [selectedMark, setSelectedMark] = useState<string | null>("demo-title");
+  const [commentDraft, setCommentDraft] = useState("");
+  const [commentReplyDraft, setCommentReplyDraft] = useState("");
+  const [editingReply, setEditingReply] = useState<{ id: string; body: string } | null>(null);
+  const [commentFilter, setCommentFilter] = useState<CommentStatusFilter>("open");
+  const [showAllComments, setShowAllComments] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
   const [isDragging, setIsDragging] = useState(false);
@@ -184,8 +204,14 @@ export function App() {
   const fileInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const signatureInput = useRef<HTMLInputElement>(null);
+  const commentEditorRef = useRef<HTMLTextAreaElement>(null);
 
   const selected = marks.find((mark) => mark.id === selectedMark) ?? null;
+  const comments = marks.filter((mark) => mark.kind === "comment" && mark.comment);
+  const visibleComments = comments.filter((mark) => {
+    if (!mark.comment) return false;
+    return (showAllComments || mark.page === currentPage) && commentMatchesFilter(mark.comment.resolved, commentFilter);
+  });
   const isBusy = workState !== null;
   const canUndo = history.past.length > 0 && !isBusy;
   const canRedo = history.future.length > 0 && !isBusy;
@@ -252,8 +278,28 @@ export function App() {
   }, [isBusy, selectedMark, marks]);
 
   useEffect(() => {
+    if (selected?.kind !== "comment" || !selected.comment) {
+      setCommentDraft("");
+      setCommentReplyDraft("");
+      setEditingReply(null);
+      return;
+    }
+
+    setCommentDraft(selected.comment.body);
+    setCommentReplyDraft("");
+    setEditingReply(null);
+    window.setTimeout(() => commentEditorRef.current?.focus(), 0);
+  }, [selectedMark]);
+
+  useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
+      if (selected?.kind === "comment") {
+        event.preventDefault();
+        cancelCommentEdit();
+        setSelectedMark(null);
+        return;
+      }
       if (!isTextMarkupKind(activeTool)) return;
 
       event.preventDefault();
@@ -266,7 +312,7 @@ export function App() {
     return () => {
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [activeTool]);
+  }, [activeTool, selected]);
 
   useEffect(() => {
     if (!pdfDoc) return;
@@ -459,6 +505,28 @@ export function App() {
     if (activeTool === "draw") return;
     if (isTextMarkupKind(activeTool)) return;
 
+    if (activeTool === "comment") {
+      const comment = createCommentData();
+      const mark: Mark = {
+        id: crypto.randomUUID(),
+        kind: "comment",
+        page: pageNumber,
+        x,
+        y,
+        width: 24,
+        height: 24,
+        text: comment.title ?? "Comment",
+        color: comment.color,
+        size: 16,
+        rotation: 0,
+        comment,
+      };
+
+      commitMarks([...marks, clampMarkToPage(mark, pages)], mark.id);
+      setActiveTool("select");
+      return;
+    }
+
     const mark: Mark = {
       id: crypto.randomUUID(),
       kind: activeTool === "text" ? "text" : activeTool,
@@ -597,6 +665,69 @@ export function App() {
     commitMarks([...marks, clampMarkToPage(pasted, pages)], pasted.id);
   }
 
+  function saveCommentBody() {
+    if (!selected || selected.kind !== "comment" || !selected.comment) return;
+    updateMark(selected.id, {
+      text: selected.comment.title || "Comment",
+      comment: {
+        ...selected.comment,
+        body: commentDraft.trim(),
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  function cancelCommentEdit() {
+    if (selected?.kind === "comment" && selected.comment) {
+      setCommentDraft(selected.comment.body);
+    }
+  }
+
+  function updateSelectedComment(patch: Partial<CommentData>) {
+    if (!selected || selected.kind !== "comment" || !selected.comment) return;
+    const nextComment = {
+      ...selected.comment,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    updateMark(selected.id, {
+      color: nextComment.color,
+      comment: nextComment,
+    });
+  }
+
+  function addCommentReply() {
+    if (!selected || selected.kind !== "comment" || !selected.comment) return;
+    const body = commentReplyDraft.trim();
+    if (!body) return;
+    updateSelectedComment({
+      replies: [...selected.comment.replies, createCommentReply(body)],
+    });
+    setCommentReplyDraft("");
+  }
+
+  function saveReplyEdit(reply: CommentReply) {
+    if (!selected || selected.kind !== "comment" || !selected.comment || !editingReply) return;
+    const nextReplies = selected.comment.replies.map((item) =>
+      item.id === reply.id ? { ...item, body: editingReply.body.trim(), updatedAt: new Date().toISOString() } : item
+    );
+    updateSelectedComment({ replies: nextReplies });
+    setEditingReply(null);
+  }
+
+  function deleteReply(replyId: string) {
+    if (!selected || selected.kind !== "comment" || !selected.comment) return;
+    updateSelectedComment({
+      replies: selected.comment.replies.filter((reply) => reply.id !== replyId),
+    });
+    if (editingReply?.id === replyId) setEditingReply(null);
+  }
+
+  function selectComment(mark: Mark) {
+    setCurrentPage(mark.page);
+    setSelectedMark(mark.id);
+  }
+
   function duplicatePage() {
     const sourcePage = pages.find((page) => page.pageNumber === currentPage);
     if (!sourcePage) return;
@@ -685,6 +816,29 @@ export function App() {
         const markWidth = (mark.width / sourcePage.width) * width;
         const markHeight = (mark.height / sourcePage.height) * height;
         const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
+
+        if (mark.kind === "comment" && mark.comment) {
+          const markerSize = Math.max(14, (24 / sourcePage.height) * height);
+          page.drawRectangle({
+            x,
+            y: y + markHeight - markerSize,
+            width: markerSize,
+            height: markerSize,
+            color: colorToRgb(mark.comment.color),
+            opacity: mark.comment.resolved ? 0.35 : 0.92,
+            borderColor: colorToRgb("#7c2d12"),
+            borderWidth: 0.75,
+          });
+          page.drawText("C", {
+            x: x + markerSize * 0.28,
+            y: y + markHeight - markerSize * 0.75,
+            size: markerSize * 0.58,
+            font: helveticaBold,
+            color: colorToRgb("#111827"),
+            opacity: mark.comment.resolved ? 0.65 : 1,
+          });
+          continue;
+        }
 
         if ((mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl) {
           const imageBytes = dataUrlToBytes(mark.imageDataUrl);
@@ -799,6 +953,8 @@ export function App() {
         });
       }
 
+      appendCommentsSummary(exportedPdf, helvetica, helveticaBold, comments);
+
       setWorkState({ message: "Saving PDF", progress: 90 });
       const exported = await exportedPdf.save();
       const blob = new Blob([exported.buffer as ArrayBuffer], { type: "application/pdf" });
@@ -894,6 +1050,7 @@ export function App() {
             <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
             <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
             <ToolButton icon={<Highlighter />} label="Add area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+            <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
             <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
             <ToolButton
               icon={<PenLine />}
@@ -1043,7 +1200,131 @@ export function App() {
               </label>
             </div>
           ) : null}
-          {selected ? (
+          {selected?.kind === "comment" && selected.comment ? (
+            <div className="control-stack comment-editor">
+              <div className={`comment-status ${selected.comment.resolved ? "resolved" : ""}`}>
+                {selected.comment.resolved ? <CheckCircle2 size={16} aria-hidden="true" /> : <MessageSquare size={16} aria-hidden="true" />}
+                <span>{selected.comment.resolved ? "Resolved comment" : "Open comment"}</span>
+              </div>
+              <label>
+                Comment
+                <textarea
+                  ref={commentEditorRef}
+                  value={commentDraft}
+                  onChange={(event) => setCommentDraft(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                      event.preventDefault();
+                      saveCommentBody();
+                    }
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      cancelCommentEdit();
+                    }
+                  }}
+                  aria-label="Comment text"
+                />
+              </label>
+              <div className="inspector-actions">
+                <button className="button ghost" onClick={saveCommentBody} title="Save comment text" aria-label="Save comment text">
+                  Save
+                </button>
+                <button className="button ghost" onClick={cancelCommentEdit} title="Cancel comment text changes" aria-label="Cancel comment text changes">
+                  Cancel
+                </button>
+              </div>
+              <label>
+                Marker colour
+                <input
+                  type="color"
+                  value={selected.comment.color}
+                  onChange={(event) => updateSelectedComment({ color: event.currentTarget.value })}
+                  aria-label="Comment marker colour"
+                />
+              </label>
+              <label>
+                Colour hex
+                <input
+                  type="text"
+                  value={selected.comment.color}
+                  onChange={(event) => {
+                    const color = normalizeHexColor(event.currentTarget.value);
+                    if (color) updateSelectedComment({ color });
+                  }}
+                  aria-label="Comment marker colour hex"
+                />
+              </label>
+              <div className="inspector-actions">
+                <button
+                  className="button ghost"
+                  onClick={() => updateSelectedComment({ resolved: !selected.comment?.resolved })}
+                  title={selected.comment.resolved ? "Reopen comment" : "Resolve comment"}
+                  aria-label={selected.comment.resolved ? "Reopen comment" : "Resolve comment"}
+                >
+                  {selected.comment.resolved ? "Reopen" : "Resolve"}
+                </button>
+                <button className="button ghost" onClick={duplicateSelectedMark} title="Duplicate comment" aria-label="Duplicate comment">
+                  Duplicate
+                </button>
+              </div>
+              <div className="reply-box">
+                <h3>Replies</h3>
+                {selected.comment.replies.length > 0 ? (
+                  <div className="reply-list">
+                    {selected.comment.replies.map((reply) => (
+                      <div className="reply-item" key={reply.id}>
+                        <div className="comment-meta">
+                          <strong>{reply.author}</strong>
+                          <span>{formatCommentDate(reply.updatedAt)}</span>
+                        </div>
+                        {editingReply?.id === reply.id ? (
+                          <>
+                            <textarea
+                              value={editingReply.body}
+                              onChange={(event) => setEditingReply({ id: reply.id, body: event.currentTarget.value })}
+                              aria-label="Edit reply text"
+                            />
+                            <div className="inspector-actions">
+                              <button className="button ghost" onClick={() => saveReplyEdit(reply)} title="Save reply" aria-label="Save reply">
+                                Save
+                              </button>
+                              <button className="button ghost" onClick={() => setEditingReply(null)} title="Cancel reply edit" aria-label="Cancel reply edit">
+                                Cancel
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <p>{reply.body}</p>
+                            <div className="reply-actions">
+                              <button className="link-button" onClick={() => setEditingReply({ id: reply.id, body: reply.body })} title="Edit reply" aria-label="Edit reply">
+                                Edit
+                              </button>
+                              <button className="link-button" onClick={() => deleteReply(reply.id)} title="Delete reply" aria-label="Delete reply">
+                                Delete
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted-text">No replies yet.</p>
+                )}
+                <label>
+                  New reply
+                  <textarea value={commentReplyDraft} onChange={(event) => setCommentReplyDraft(event.currentTarget.value)} aria-label="New reply text" />
+                </label>
+                <button className="button ghost full-width" onClick={addCommentReply} disabled={!commentReplyDraft.trim()} title="Add reply" aria-label="Add reply">
+                  Add reply
+                </button>
+              </div>
+              <button className="button ghost full-width" onClick={removeSelectedMark} title="Delete comment" aria-label="Delete comment">
+                Delete comment
+              </button>
+            </div>
+          ) : selected ? (
             <div className="control-stack">
               {!isTextMarkupKind(selected.kind) ? (
                 <label>
@@ -1270,6 +1551,58 @@ export function App() {
             </div>
           )}
 
+          <section className="comments-panel" aria-label="Comments">
+            <div className="comments-panel-header">
+              <h3>Comments</h3>
+              <button
+                className="link-button"
+                onClick={() => setShowAllComments((value) => !value)}
+                title={showAllComments ? "Show comments on current page" : "Show comments on all pages"}
+                aria-label={showAllComments ? "Show comments on current page" : "Show comments on all pages"}
+              >
+                {showAllComments ? "All pages" : "Page only"}
+              </button>
+            </div>
+            <div className="comment-filters" role="group" aria-label="Filter comments">
+              {(["open", "resolved", "all"] as const).map((filter) => (
+                <button
+                  className={commentFilter === filter ? "active" : ""}
+                  key={filter}
+                  onClick={() => setCommentFilter(filter)}
+                  title={`Show ${filter} comments`}
+                  aria-label={`Show ${filter} comments`}
+                  aria-pressed={commentFilter === filter}
+                >
+                  {filter}
+                </button>
+              ))}
+            </div>
+            <div className="comment-list">
+              {visibleComments.length > 0 ? (
+                visibleComments.map((mark) => (
+                  <button
+                    className={`comment-entry ${selectedMark === mark.id ? "active" : ""} ${mark.comment?.resolved ? "resolved" : ""}`}
+                    key={mark.id}
+                    onClick={() => selectComment(mark)}
+                    title={`Go to comment on page ${mark.page}`}
+                    aria-label={`Go to ${mark.comment?.resolved ? "resolved" : "open"} comment on page ${mark.page}: ${getCommentPreview(mark.comment?.body ?? "")}`}
+                  >
+                    <span className="comment-entry-dot" style={{ backgroundColor: mark.comment?.color }} />
+                    <span className="comment-entry-body">
+                      <strong>Page {mark.page}</strong>
+                      <span>{getCommentPreview(mark.comment?.body ?? "")}</span>
+                      <small>
+                        {mark.comment?.resolved ? "Resolved" : "Open"} · {mark.comment?.replies.length ?? 0} replies
+                      </small>
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <p className="muted-text">No comments match this view.</p>
+              )}
+            </div>
+          </section>
+
           <div className="document-stats">
             <div>
               <strong>{pages.length}</strong>
@@ -1333,6 +1666,7 @@ function DocumentPage({
   const [draftStroke, setDraftStroke] = useState<StrokePoint[]>([]);
   const [draftSignature, setDraftSignature] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
   const [draftTextSelection, setDraftTextSelection] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
+  const activeDraftStroke = Array.isArray(draftStroke) ? draftStroke : [];
 
   function pagePoint(event: PointerEvent<HTMLDivElement>) {
     const bounds = pageRef.current?.getBoundingClientRect();
@@ -1414,8 +1748,8 @@ function DocumentPage({
         onAddMark(page.pageNumber, point.x, point.y);
       }}
           onPointerMove={(event) => {
-            if (draftStroke.length > 0) {
-              setDraftStroke((existing) => [...existing, pagePoint(event)]);
+            if (activeDraftStroke.length > 0) {
+              setDraftStroke((existing) => [...(Array.isArray(existing) ? existing : []), pagePoint(event)]);
               return;
             }
             if (draftSignature) {
@@ -1440,9 +1774,9 @@ function DocumentPage({
             onPreviewMark(activeMark.id, latest);
           }}
       onPointerUp={(event) => {
-        if (draftStroke.length > 0) {
+        if (activeDraftStroke.length > 0) {
           event.currentTarget.releasePointerCapture(event.pointerId);
-          const nextStroke = [...draftStroke, pagePoint(event)];
+          const nextStroke = [...activeDraftStroke, pagePoint(event)];
           setDraftStroke([]);
           onAddStroke(page.pageNumber, nextStroke);
           return;
@@ -1472,7 +1806,7 @@ function DocumentPage({
         }
       }}
       onPointerLeave={() => {
-        if (draftStroke.length > 0) return;
+        if (activeDraftStroke.length > 0) return;
         if (draftTextSelection) return;
         const drag = dragRef.current;
         dragRef.current = null;
@@ -1507,10 +1841,10 @@ function DocumentPage({
           style={getDraftSelectionStyle(draftTextSelection.start, draftTextSelection.current, zoom)}
         />
       ) : null}
-      {draftStroke.length > 0 ? (
+      {activeDraftStroke.length > 0 ? (
         <svg className="draft-stroke-layer" viewBox={`0 0 ${page.width} ${page.height}`} aria-hidden="true">
           <path
-            d={pointsToSvgPath(smoothStrokePoints(draftStroke))}
+            d={pointsToSvgPath(smoothStrokePoints(activeDraftStroke))}
             fill="none"
             stroke={penColor}
             strokeLinecap="round"
@@ -1533,17 +1867,17 @@ function DocumentPage({
       ) : null}
       {marks.map((mark) => (
         <button
-          className={`mark mark-${mark.kind} ${selectedMark === mark.id ? "selected" : ""}`}
+          className={`mark mark-${mark.kind} ${selectedMark === mark.id ? "selected" : ""} ${mark.kind === "comment" && mark.comment?.resolved ? "resolved" : ""}`}
           key={mark.id}
           title={getMarkLabel(mark)}
           aria-label={getMarkLabel(mark)}
           style={{
             left: mark.x * zoom,
             top: mark.y * zoom,
-            width: mark.width * zoom,
-            height: mark.height * zoom,
+            width: mark.kind === "comment" ? COMMENT_MARKER_SIZE : mark.width * zoom,
+            height: mark.kind === "comment" ? COMMENT_MARKER_SIZE : mark.height * zoom,
             color: mark.color,
-            fontSize: mark.size * zoom,
+            fontSize: mark.kind === "comment" ? 16 : mark.size * zoom,
             backgroundColor: mark.kind === "highlight" ? hexToRgba(mark.color, 0.48) : undefined,
             transform: mark.rotation ? `rotate(${mark.rotation}deg)` : undefined,
           }}
@@ -1616,7 +1950,15 @@ function DocumentPage({
               />
             </svg>
           ) : null}
-          {mark.kind !== "highlight" && mark.kind !== "image" && mark.kind !== "pngSignature" && mark.kind !== "stroke" && !isTextMarkupKind(mark.kind) ? mark.text : ""}
+          {mark.kind === "comment" ? <MessageSquare size={16} aria-hidden="true" /> : null}
+          {mark.kind !== "highlight" &&
+          mark.kind !== "image" &&
+          mark.kind !== "pngSignature" &&
+          mark.kind !== "stroke" &&
+          mark.kind !== "comment" &&
+          !isTextMarkupKind(mark.kind)
+            ? mark.text
+            : ""}
           {(mark.kind === "image" || mark.kind === "pngSignature") && selectedMark === mark.id
             ? (["nw", "ne", "sw", "se"] as const).map((corner) => (
                 <span
@@ -1686,6 +2028,64 @@ function ProgressOverlay({ message, progress }: WorkState) {
       </div>
     </div>
   );
+}
+
+function appendCommentsSummary(pdf: PDFDocument, font: PDFFont, boldFont: PDFFont, commentMarks: Mark[]) {
+  const exportedComments = commentMarks.filter((mark) => mark.kind === "comment" && mark.comment);
+  if (exportedComments.length === 0) return;
+
+  let page = pdf.addPage([612, 792]);
+  let y = 742;
+  const margin = 54;
+  const lineHeight = 15;
+
+  function ensureSpace(requiredHeight: number) {
+    if (y - requiredHeight >= 52) return;
+    page = pdf.addPage([612, 792]);
+    y = 742;
+  }
+
+  function drawLine(text: string, size = 10, bold = false, color = "#172033") {
+    page.drawText(text || " ", {
+      x: margin,
+      y,
+      size,
+      font: bold ? boldFont : font,
+      color: colorToRgb(color),
+    });
+    y -= lineHeight;
+  }
+
+  page.drawText("Comments Summary", {
+    x: margin,
+    y,
+    size: 18,
+    font: boldFont,
+    color: colorToRgb("#172033"),
+  });
+  y -= 28;
+  drawLine("Sticky note markers are embedded on their original PDF pages. Full comment text and replies are listed below.", 9, false, "#475569");
+  y -= 8;
+
+  for (const [index, mark] of exportedComments.entries()) {
+    if (!mark.comment) continue;
+    const bodyLines = wrapText(mark.comment.body || "No comment text yet.", 78);
+    const replyLines = mark.comment.replies.flatMap((reply) => [
+      `${reply.author} (${formatCommentDate(reply.updatedAt)}):`,
+      ...wrapText(reply.body, 74).map((line) => `  ${line}`),
+    ]);
+    ensureSpace(74 + (bodyLines.length + replyLines.length) * lineHeight);
+
+    const status = mark.comment.resolved ? "Resolved" : "Open";
+    drawLine(`${index + 1}. Page ${mark.page} - ${status}`, 12, true);
+    drawLine(`Author: ${mark.comment.author} · Created: ${formatCommentDate(mark.comment.createdAt)} · Updated: ${formatCommentDate(mark.comment.updatedAt)}`, 8.5, false, "#64748b");
+    for (const line of bodyLines) drawLine(line, 10);
+    if (mark.comment.replies.length > 0) {
+      drawLine("Replies", 9.5, true, "#475569");
+      for (const line of replyLines) drawLine(line, 9);
+    }
+    y -= 10;
+  }
 }
 
 function colorToRgb(hex: string) {
@@ -2143,6 +2543,7 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       mark.opacity === other.opacity &&
       mark.thickness === other.thickness &&
       mark.lockAspectRatio === other.lockAspectRatio &&
+      JSON.stringify(mark.comment ?? null) === JSON.stringify(other.comment ?? null) &&
       JSON.stringify(mark.markupRects ?? []) === JSON.stringify(other.markupRects ?? []) &&
       mark.strokeOpacity === other.strokeOpacity &&
       JSON.stringify(mark.strokePoints ?? []) === JSON.stringify(other.strokePoints ?? [])
@@ -2151,6 +2552,9 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
 }
 
 function getMarkLabel(mark: Mark) {
+  if (mark.kind === "comment" && mark.comment) {
+    return `${mark.comment.resolved ? "Resolved" : "Open"} comment annotation: ${getCommentPreview(mark.comment.body)}`;
+  }
   if (mark.kind === "stroke") return "Freehand stroke annotation";
   if (mark.kind === "textHighlight") return "Text highlight annotation";
   if (mark.kind === "underline") return "Underline annotation";

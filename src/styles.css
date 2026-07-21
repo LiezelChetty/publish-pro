@@ -118,6 +118,9 @@ button {
 .tool-button:focus-visible,
 .thumb:focus-visible,
 .mark:focus-visible,
+.link-button:focus-visible,
+.comment-filters button:focus-visible,
+.comment-entry:focus-visible,
 .searchbox input:focus-visible,
 .control-stack textarea:focus-visible,
 .control-stack input:focus-visible {
@@ -516,6 +519,26 @@ button {
   background: transparent;
 }
 
+.mark-comment {
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgb(124 45 18 / 0.34);
+  border-radius: 8px;
+  background: currentColor;
+  box-shadow: 0 6px 14px rgb(15 23 42 / 0.2);
+  color: #facc15;
+}
+
+.mark-comment svg {
+  color: #172033;
+  filter: drop-shadow(0 1px 0 rgb(255 255 255 / 0.45));
+}
+
+.mark-comment.resolved {
+  opacity: 0.55;
+}
+
 .stroke-mark-svg,
 .draft-stroke-layer {
   position: absolute;
@@ -599,6 +622,7 @@ button {
 }
 
 .inspector {
+  overflow: auto;
   border-right: 0;
   border-left: 1px solid #d8dde7;
   padding: 18px;
@@ -684,6 +708,213 @@ button {
   min-height: 36px;
   padding: 0 10px;
   font-size: 13px;
+}
+
+.full-width {
+  width: 100%;
+}
+
+.comment-editor {
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e0e5ee;
+}
+
+.comment-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 1px solid #fde68a;
+  border-radius: 999px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.comment-status.resolved {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.reply-box {
+  display: grid;
+  gap: 10px;
+}
+
+.reply-box h3,
+.comments-panel h3 {
+  margin: 0;
+  color: #172033;
+  font-size: 13px;
+}
+
+.reply-list {
+  display: grid;
+  gap: 10px;
+}
+
+.reply-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d8dde7;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.reply-item p {
+  margin: 0;
+  color: #243044;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.comment-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.comment-meta strong {
+  color: #172033;
+}
+
+.reply-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.link-button {
+  padding: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #d8342a;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.link-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.comments-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #e0e5ee;
+}
+
+.comments-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.comment-filters {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.comment-filters button {
+  height: 30px;
+  border: 1px solid #cfd6e2;
+  border-radius: 7px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.comment-filters button.active {
+  border-color: #d8342a;
+  background: #fff2f0;
+  color: #9f1d16;
+}
+
+.comment-list {
+  display: grid;
+  max-height: 246px;
+  gap: 8px;
+  overflow: auto;
+}
+
+.comment-entry {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid #d8dde7;
+  border-radius: 8px;
+  background: #fff;
+  color: #243044;
+  cursor: pointer;
+  text-align: left;
+}
+
+.comment-entry.active {
+  border-color: #d8342a;
+  background: #fff7f6;
+}
+
+.comment-entry.resolved {
+  opacity: 0.68;
+}
+
+.comment-entry-dot {
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  border: 1px solid rgb(15 23 42 / 0.22);
+  border-radius: 3px;
+}
+
+.comment-entry-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.comment-entry-body strong,
+.comment-entry-body span,
+.comment-entry-body small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comment-entry-body strong {
+  font-size: 12px;
+}
+
+.comment-entry-body span {
+  color: #475569;
+  font-size: 12px;
+}
+
+.comment-entry-body small,
+.muted-text {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.muted-text {
+  margin: 0;
+  line-height: 1.4;
 }
 
 .empty-panel {
