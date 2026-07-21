@@ -55,13 +55,18 @@ button {
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
   border-radius: 8px;
-  background: #d8342a;
-  color: #fff;
-  font-weight: 800;
-  letter-spacing: 0;
+  background: #ffffff;
+}
+
+.brand-mark img {
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
 }
 
 .brand h1 {
@@ -331,6 +336,8 @@ button {
 
 .progress-panel {
   display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
   width: 100%;
   gap: 10px;
   padding: 14px;
@@ -340,12 +347,20 @@ button {
   box-shadow: 0 12px 28px rgb(23 32 51 / 0.16);
 }
 
+.progress-logo {
+  display: block;
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
 .progress-panel strong {
   color: #243044;
   font-size: 13px;
 }
 
 .progress-track {
+  grid-column: 1 / -1;
   overflow: hidden;
   height: 8px;
   border-radius: 999px;
@@ -388,12 +403,20 @@ button {
 .blank-page {
   display: grid;
   place-content: center;
-  gap: 12px;
+  justify-items: center;
+  gap: 11px;
   color: #7b8494;
   background:
     linear-gradient(#ffffff, #ffffff) padding-box,
     repeating-linear-gradient(0deg, #eef1f5 0 1px, transparent 1px 36px),
     repeating-linear-gradient(90deg, #eef1f5 0 1px, transparent 1px 36px);
+}
+
+.blank-logo {
+  display: block;
+  width: min(320px, 58%);
+  max-height: 72px;
+  object-fit: contain;
 }
 
 .blank-page span {

@@ -1,0 +1,17 @@
+{
+  "name": "Publish Pro",
+  "short_name": "Publish Pro",
+  "description": "Client-side PDF editing workspace.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#d8342a",
+  "icons": [
+    {
+      "src": "/brand/publish-pro-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -56,6 +56,8 @@ type PageView = {
 
 const PAGE_SCALE = 1.35;
 const BRAND_RED = "#d8342a";
+const BRAND_ICON_SRC = "/brand/publish-pro-icon.svg";
+const BRAND_LOGO_SRC = "/brand/publish-pro-logo.svg";
 
 const demoPages: PageView[] = [
   {
@@ -364,7 +366,9 @@ export function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">P</div>
+          <div className="brand-mark" aria-hidden="true">
+            <img src={BRAND_ICON_SRC} alt="" />
+          </div>
           <div>
             <h1>Publish Pro</h1>
             <p>{pdfName}</p>
@@ -654,7 +658,8 @@ function DocumentPage({
 function BlankPage() {
   return (
     <div className="blank-page">
-      <FilePlus2 size={44} />
+      <img className="blank-logo" src={BRAND_LOGO_SRC} alt="Publish Pro" />
+      <FilePlus2 size={34} aria-hidden="true" />
       <span>New PDF page</span>
     </div>
   );
@@ -684,6 +689,7 @@ function ProgressOverlay({ message, progress }: WorkState) {
   return (
     <div className="progress-overlay" role="status" aria-live="polite">
       <div className="progress-panel">
+        <img className="progress-logo" src={BRAND_ICON_SRC} alt="" aria-hidden="true" />
         <strong>{message}</strong>
         <div className="progress-track" aria-label={progress === undefined ? message : `${Math.round(progress)}% complete`}>
           <span style={{ width: `${clamp(progress ?? 100, 0, 100)}%` }} />
