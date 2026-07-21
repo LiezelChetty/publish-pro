@@ -1754,3 +1754,353 @@ button {
     padding: 18px;
   }
 }
+
+/* Modern desktop shell refresh */
+.app-shell {
+  grid-template-rows: 44px 50px minmax(0, 1fr) 30px;
+  background: #f6f7f9;
+}
+
+.app-chrome {
+  padding: 0 14px;
+  border-bottom: 1px solid rgb(15 23 42 / 0.06);
+  background: rgb(255 255 255 / 0.92);
+  backdrop-filter: blur(16px);
+}
+
+.document-tabs {
+  display: none;
+}
+
+.workspace {
+  grid-template-columns: 64px 252px minmax(0, 1fr) 314px;
+  border-bottom: 1px solid rgb(15 23 42 / 0.06);
+}
+
+.app-shell.left-collapsed .workspace {
+  grid-template-columns: 64px minmax(0, 1fr) 314px;
+}
+
+.app-shell.right-collapsed .workspace {
+  grid-template-columns: 64px 252px minmax(0, 1fr) 44px;
+}
+
+.app-shell.left-collapsed.right-collapsed .workspace {
+  grid-template-columns: 64px minmax(0, 1fr) 44px;
+}
+
+.left-nav {
+  grid-template-rows: repeat(5, 52px) minmax(0, 1fr) 52px;
+  gap: 8px;
+  padding: 14px 8px;
+  border-right: 0;
+  background: #fbfbfc;
+}
+
+.rail-button {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  color: #64748b;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.rail-button:hover {
+  background: #f0f2f5;
+  color: #1f2937;
+}
+
+.rail-button.active {
+  border-color: transparent;
+  background: #171717;
+  color: #fff;
+  box-shadow: 0 10px 22px rgb(15 23 42 / 0.14);
+}
+
+.left-panel,
+.inspector {
+  border-right: 0;
+  background: #fbfbfc;
+}
+
+.inspector {
+  border-left: 0;
+}
+
+.panel-header,
+.inspector-header {
+  border-bottom: 0;
+  padding-bottom: 2px;
+}
+
+.main-toolbar {
+  gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgb(15 23 42 / 0.06);
+  background: #fbfbfc;
+}
+
+.toolbar-group {
+  gap: 5px;
+  padding: 4px 7px;
+  border-right: 0;
+  border-radius: 14px;
+  background: #f2f4f7;
+}
+
+.tool-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.tool-button:hover:not(:disabled),
+.tool-button.active {
+  background: #fff;
+  color: #d8342a;
+  box-shadow: 0 4px 12px rgb(15 23 42 / 0.08);
+}
+
+.toolbar-menu {
+  position: relative;
+}
+
+.toolbar-menu summary {
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  gap: 7px;
+  padding: 0 11px;
+  border-radius: 12px;
+  color: #334155;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.toolbar-menu summary::-webkit-details-marker,
+.panel-menu summary::-webkit-details-marker,
+.chrome-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.toolbar-menu summary:hover,
+.toolbar-menu[open] summary {
+  background: #f2f4f7;
+}
+
+.toolbar-menu-panel,
+.panel-menu-list,
+.chrome-menu-panel {
+  position: absolute;
+  z-index: 90;
+  display: grid;
+  min-width: 210px;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid rgb(15 23 42 / 0.08);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 22px 48px rgb(15 23 42 / 0.18);
+}
+
+.toolbar-menu-panel {
+  top: 44px;
+  left: 0;
+}
+
+.menu-tool-button,
+.panel-menu-list button,
+.chrome-menu-panel button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 32px;
+  gap: 9px;
+  padding: 0 9px;
+  border-radius: 8px;
+  background: transparent;
+  color: #293241;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.menu-tool-button:hover:not(:disabled),
+.menu-tool-button.active,
+.panel-menu-list button:hover:not(:disabled),
+.chrome-menu-panel button:hover:not(:disabled) {
+  background: #f5f6f8;
+  color: #d8342a;
+}
+
+.panel-menu {
+  position: relative;
+}
+
+.panel-menu summary {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.panel-menu summary:hover,
+.panel-menu[open] summary {
+  background: #f0f2f5;
+}
+
+.panel-menu-list {
+  top: 36px;
+  right: 0;
+}
+
+.page-panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid rgb(15 23 42 / 0.06);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.page-label-inline {
+  display: grid;
+  gap: 5px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.page-label-inline input {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: #f1f3f6;
+}
+
+.page-management {
+  overflow: visible;
+  gap: 8px;
+}
+
+.page-list {
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.thumb {
+  border-radius: 12px;
+  padding: 9px;
+  transition: background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.thumb:hover {
+  background: #f2f4f7;
+}
+
+.thumb.selected {
+  border-color: transparent;
+  background: #fff;
+  box-shadow: inset 3px 0 0 #d8342a, 0 8px 22px rgb(15 23 42 / 0.08);
+}
+
+.thumb.current {
+  border-color: transparent;
+  background: #fff7f6;
+}
+
+.editor {
+  background: radial-gradient(circle at center, #eef0f3 0, #e6e8ed 100%);
+}
+
+.canvas-stage {
+  padding: 22px 34px 34px;
+}
+
+.document-page {
+  box-shadow: 0 18px 45px rgb(15 23 42 / 0.18);
+}
+
+.inspector-section {
+  overflow: hidden;
+  display: grid;
+  border: 1px solid rgb(15 23 42 / 0.06);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.inspector-section summary {
+  padding: 10px 12px;
+  color: #1f2937;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.inspector-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.inspector-section-body,
+.comments-panel-body {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  padding: 0 12px 12px;
+}
+
+.control-stack {
+  border: 0;
+  background: transparent;
+}
+
+.control-stack label,
+.dialog-body label {
+  color: #536073;
+  font-size: 11px;
+}
+
+.control-stack input,
+.control-stack select,
+.control-stack textarea {
+  border-color: transparent;
+  border-radius: 10px;
+  background: #f4f6f8;
+}
+
+.comments-panel {
+  padding: 0;
+  border: 1px solid rgb(15 23 42 / 0.06);
+  background: #fff;
+}
+
+.chrome-menu {
+  position: relative;
+}
+
+.chrome-menu-panel {
+  top: 36px;
+  right: 0;
+}
+
+.statusbar {
+  border-top: 1px solid rgb(15 23 42 / 0.06);
+  background: #fbfbfc;
+}
+
+@media (max-width: 1366px) {
+  .workspace {
+    grid-template-columns: 60px 230px minmax(0, 1fr) 290px;
+  }
+}

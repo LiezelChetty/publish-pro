@@ -15,6 +15,7 @@ import {
   MessageSquare,
   Minus,
   MousePointer2,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -93,7 +94,7 @@ GlobalWorkerOptions.workerSrc = pdfWorker;
 type ShapeTool = `shape:${ShapeKind}`;
 type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | ShapeTool | TextMarkupKind;
 type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | "comment" | "shape" | TextMarkupKind;
-type LeftPanel = "pages" | "files" | "bookmarks" | "comments" | "search";
+type LeftPanel = "pages" | "insert" | "bookmarks" | "comments" | "search";
 type WorkState = {
   message: string;
   progress?: number;
@@ -2175,72 +2176,55 @@ export function App() {
       ) : null}
 
       <nav className="main-toolbar" aria-label="PDF tools">
-        <div className="toolbar-group" aria-label="Navigation tools">
+        <div className="toolbar-group primary-tools" aria-label="Navigation">
           <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
           <ToolButton icon={<Hand />} label="Hand tool" disabled />
           <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} />
           <span className="zoom-label">{Math.round(zoom * 100)}%</span>
           <ToolButton icon={<ZoomIn />} label="Zoom in" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} disabled={isBusy} />
           <ToolButton icon={<Maximize2 />} label="Fit page" onClick={() => setZoom(1)} disabled={isBusy} />
-          <button className="toolbar-text-button" onClick={() => setZoom(1.25)} disabled={isBusy} title="Fit width" aria-label="Fit width">
-            Fit width
-          </button>
         </div>
-        <div className="toolbar-group" aria-label="Edit tools">
-          <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
-          <ToolButton
-            icon={<ImageIcon />}
-            label="Add image"
-            active={activeTool === "image"}
-            onClick={() => {
-              setActiveTool("image");
-              imageInput.current?.click();
-            }}
-            disabled={isBusy}
-          />
-          <ToolButton
-            icon={<PenLine />}
-            label="Upload PNG signature"
-            active={activeTool === "pngSignature"}
-            onClick={() => {
-              setActiveTool("pngSignature");
-              signatureInput.current?.click();
-            }}
-            disabled={isBusy}
-          />
-          <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
-        </div>
-        <div className="toolbar-group" aria-label="Annotation tools">
+        <ToolbarMenu icon={<Plus />} label="Insert">
+          <MenuToolButton icon={<TextCursorInput />} label="Text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
+          <MenuToolButton icon={<ImageIcon />} label="Image" active={activeTool === "image"} onClick={() => { setActiveTool("image"); imageInput.current?.click(); }} disabled={isBusy} />
+          <MenuToolButton icon={<PenLine />} label="PNG signature" active={activeTool === "pngSignature"} onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} disabled={isBusy} />
+          <MenuToolButton icon={<PenLine />} label="Signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
+          <MenuToolButton icon={<FilePlus2 />} label="Blank pages" onClick={() => setActivePageDialog("blank")} disabled={isBusy} />
+          <MenuToolButton icon={<Files />} label="Combine files" onClick={() => setActivePageDialog("merge")} disabled={isBusy} />
+        </ToolbarMenu>
+        <div className="toolbar-group compact-tools" aria-label="Markup">
           <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
           <ToolButton icon={<Highlighter />} label="Highlight selected text" active={activeTool === "textHighlight"} onClick={() => setActiveTool("textHighlight")} disabled={isBusy} />
           <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
           <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
-          <ToolButton icon={<Highlighter />} label="Add area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+        </div>
+        <ToolbarMenu icon={<Square />} label="Shapes">
+          <MenuToolButton icon={<Highlighter />} label="Area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+          <MenuToolButton icon={<Square />} label="Rectangle" active={activeTool === "shape:rectangle"} onClick={() => setActiveTool("shape:rectangle")} disabled={isBusy} />
+          <MenuToolButton icon={<Circle />} label="Ellipse" active={activeTool === "shape:ellipse"} onClick={() => setActiveTool("shape:ellipse")} disabled={isBusy} />
+          <MenuToolButton icon={<Minus />} label="Line" active={activeTool === "shape:line"} onClick={() => setActiveTool("shape:line")} disabled={isBusy} />
+          <MenuToolButton icon={<CornerUpRight />} label="Arrow" active={activeTool === "shape:arrow"} onClick={() => setActiveTool("shape:arrow")} disabled={isBusy} />
+          <MenuToolButton icon={<CornerUpRight />} label="Double arrow" active={activeTool === "shape:doubleArrow"} onClick={() => setActiveTool("shape:doubleArrow")} disabled={isBusy} />
+          <MenuToolButton icon={<Square />} label="Rounded rectangle" active={activeTool === "shape:roundedRectangle"} onClick={() => setActiveTool("shape:roundedRectangle")} disabled={isBusy} />
+          <MenuToolButton icon={<Square />} label="Polygon" active={activeTool === "shape:polygon"} onClick={() => setActiveTool("shape:polygon")} disabled={isBusy} />
+          <MenuToolButton icon={<Circle />} label="Cloud" active={activeTool === "shape:cloud"} onClick={() => setActiveTool("shape:cloud")} disabled={isBusy} />
+          <MenuToolButton icon={<MessageSquare />} label="Callout" active={activeTool === "shape:callout"} onClick={() => setActiveTool("shape:callout")} disabled={isBusy} />
+        </ToolbarMenu>
+        <div className="toolbar-group compact-tools" aria-label="Review">
           <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
-          <ToolButton icon={<Square />} label="Add rectangle" active={activeTool === "shape:rectangle"} onClick={() => setActiveTool("shape:rectangle")} disabled={isBusy} />
-          <ToolButton icon={<Circle />} label="Add ellipse" active={activeTool === "shape:ellipse"} onClick={() => setActiveTool("shape:ellipse")} disabled={isBusy} />
-          <ToolButton icon={<Minus />} label="Add line" active={activeTool === "shape:line"} onClick={() => setActiveTool("shape:line")} disabled={isBusy} />
-          <ToolButton icon={<CornerUpRight />} label="Add arrow" active={activeTool === "shape:arrow"} onClick={() => setActiveTool("shape:arrow")} disabled={isBusy} />
-          <ToolButton icon={<CornerUpRight />} label="Add double-ended arrow" active={activeTool === "shape:doubleArrow"} onClick={() => setActiveTool("shape:doubleArrow")} disabled={isBusy} />
-          <ToolButton icon={<Square />} label="Add rounded rectangle" active={activeTool === "shape:roundedRectangle"} onClick={() => setActiveTool("shape:roundedRectangle")} disabled={isBusy} />
-          <ToolButton icon={<Square />} label="Add polygon" active={activeTool === "shape:polygon"} onClick={() => setActiveTool("shape:polygon")} disabled={isBusy} />
-          <ToolButton icon={<Circle />} label="Add cloud" active={activeTool === "shape:cloud"} onClick={() => setActiveTool("shape:cloud")} disabled={isBusy} />
-          <ToolButton icon={<MessageSquare />} label="Add text callout" active={activeTool === "shape:callout"} onClick={() => setActiveTool("shape:callout")} disabled={isBusy} />
           <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
         </div>
-        <div className="toolbar-group" aria-label="Document actions">
+        <div className="toolbar-group history-tools" aria-label="History and export">
           <ToolButton icon={<Undo2 />} label="Undo" onClick={undo} disabled={!canUndo} />
           <ToolButton icon={<Redo2 />} label="Redo" onClick={redo} disabled={!canRedo} />
-          <ToolButton icon={<Trash2 />} label="Delete selected annotation" onClick={removeSelectedMark} disabled={!selectedMark || isBusy} />
-          <ToolButton icon={<FilePlus2 />} label="Add a blank page" onClick={addPage} disabled={isBusy} />
           <ToolButton icon={<Download />} label="Export edited PDF" onClick={() => void exportPdf()} disabled={isBusy} />
         </div>
       </nav>
 
       <section className="workspace">
         <nav className="left-nav" aria-label="Navigation panels">
-          <RailButton icon={<Files />} label="Files" active={leftPanel === "files" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("files"); setIsLeftPanelCollapsed(false); }} />
           <RailButton icon={<FilePlus2 />} label="Pages" active={leftPanel === "pages" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("pages"); setIsLeftPanelCollapsed(false); }} />
+          <RailButton icon={<Plus />} label="Insert" active={leftPanel === "insert" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("insert"); setIsLeftPanelCollapsed(false); }} />
           <RailButton icon={<BookOpen />} label="Bookmarks" active={leftPanel === "bookmarks" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("bookmarks"); setIsLeftPanelCollapsed(false); }} />
           <RailButton icon={<MessageSquare />} label="Comments" active={leftPanel === "comments" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("comments"); setIsLeftPanelCollapsed(false); }} />
           <RailButton icon={<Search />} label="Search" active={leftPanel === "search" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("search"); setIsLeftPanelCollapsed(false); }} />
@@ -2314,95 +2298,56 @@ export function App() {
                   ))}
                 </div>
                 <div className="page-management">
-                  <section className="page-management-section" aria-label="Page selection">
-                    <div className="page-actions">
-                      <button className="button ghost" onClick={selectAllPages} disabled={isBusy} title="Select all pages" aria-label="Select all pages">
-                        Select all
-                      </button>
-                      <button className="button ghost" onClick={clearPageSelection} disabled={isBusy} title="Clear page selection" aria-label="Clear page selection">
-                        Clear
-                      </button>
-                    </div>
-                  </section>
-
-                  <section className="page-management-section" aria-label="Add and import pages">
-                    <div className="page-actions">
-                      <button className="button ghost" onClick={() => setActivePageDialog("blank")} disabled={isBusy} title="Open blank page dialog" aria-label="Open blank page dialog">
-                        Blank pages
-                      </button>
-                      <button className="button ghost" onClick={() => setActivePageDialog("merge")} disabled={isBusy} title="Combine PDF files" aria-label="Combine PDF files">
-                        <Files size={15} />
-                        Combine
-                      </button>
-                    </div>
-                  </section>
-
-                  <section className="page-management-section" aria-label="Page operations">
-                    <div className="page-actions">
-                      <button className="button ghost" onClick={duplicatePage} disabled={isBusy} title="Duplicate selected pages" aria-label="Duplicate selected pages">
-                        <FilePlus2 size={15} />
-                        Duplicate
-                      </button>
-                      <button className="button ghost" onClick={deleteSelectedPages} disabled={isBusy || pages.length === 0} title="Delete selected pages" aria-label="Delete selected pages">
-                        <Trash2 size={15} />
-                        Delete
-                      </button>
-                      <button className="button ghost" onClick={() => void rotateSelectedPages(90)} disabled={isBusy} title="Rotate selected pages clockwise" aria-label="Rotate selected pages clockwise">
-                        Rotate CW
-                      </button>
-                      <button className="button ghost" onClick={() => void rotateSelectedPages(-90)} disabled={isBusy} title="Rotate selected pages counter-clockwise" aria-label="Rotate selected pages counter-clockwise">
-                        Rotate CCW
-                      </button>
-                      <button className="button ghost" onClick={() => void rotateSelectedPages(180)} disabled={isBusy} title="Rotate selected pages 180 degrees" aria-label="Rotate selected pages 180 degrees">
-                        180
-                      </button>
-                      <button className="button ghost" onClick={() => setActivePageDialog("replace")} disabled={isBusy} title="Replace selected page" aria-label="Replace selected page">
-                        Replace
-                      </button>
-                    </div>
-                  </section>
-
-                  <section className="page-management-section" aria-label="Page clipboard and export">
-                    <div className="page-actions">
-                      <button className="button ghost" onClick={copySelectedPages} disabled={isBusy} title="Copy selected pages" aria-label="Copy selected pages">
-                        Copy
-                      </button>
-                      <button className="button ghost" onClick={() => pasteCopiedPages("after")} disabled={isBusy || !copiedPages} title="Paste copied pages after selection" aria-label="Paste copied pages after selection">
-                        Paste
-                      </button>
-                      <button className="button ghost" onClick={() => setActivePageDialog("extract")} disabled={isBusy} title="Extract selected pages as a PDF" aria-label="Extract selected pages as a PDF">
-                        Extract
-                      </button>
-                      <button className="button ghost" onClick={() => setActivePageDialog("split")} disabled={isBusy || pages.length <= 1} title="Open split PDF dialog" aria-label="Open split PDF dialog">
-                        Split
-                      </button>
-                    </div>
-                  </section>
-
-                  <section className="page-management-section" aria-label="Page labels">
-                    <label>
-                      Selected page label
-                      <input
-                        value={pages.find((page) => selectedPageIds.includes(page.id))?.label ?? ""}
-                        onChange={(event) => updateSelectedPageLabel(event.target.value)}
-                        placeholder="Cover, Section A, A-01..."
-                        disabled={isBusy}
-                      />
-                    </label>
-                    <button className="button ghost" onClick={() => setActivePageDialog("labels")} disabled={isBusy} title="Apply label pattern" aria-label="Apply label pattern">
-                      Pattern
-                    </button>
-                  </section>
+                  <div className="page-panel-toolbar">
+                    <span>{selectedPageCount > 1 ? `${selectedPageCount} selected` : "Page tools"}</span>
+                    <details className="panel-menu">
+                      <summary title="Page actions" aria-label="Page actions">
+                        <MoreHorizontal size={18} />
+                      </summary>
+                      <div className="panel-menu-list" role="menu">
+                        <button onClick={selectAllPages}>Select all</button>
+                        <button onClick={clearPageSelection}>Clear selection</button>
+                        <button onClick={() => setActivePageDialog("blank")}>Insert blank pages</button>
+                        <button onClick={() => setActivePageDialog("merge")}>Combine files</button>
+                        <button onClick={duplicatePage}>Duplicate</button>
+                        <button onClick={copySelectedPages}>Copy</button>
+                        <button onClick={() => pasteCopiedPages("after")} disabled={!copiedPages}>Paste</button>
+                        <button onClick={() => void rotateSelectedPages(90)}>Rotate right</button>
+                        <button onClick={() => void rotateSelectedPages(-90)}>Rotate left</button>
+                        <button onClick={() => void rotateSelectedPages(180)}>Rotate 180</button>
+                        <button onClick={() => setActivePageDialog("replace")}>Replace</button>
+                        <button onClick={() => setActivePageDialog("extract")}>Extract</button>
+                        <button onClick={() => setActivePageDialog("split")} disabled={pages.length <= 1}>Split</button>
+                        <button onClick={() => setActivePageDialog("labels")}>Label pattern</button>
+                        <button className="danger" onClick={deleteSelectedPages}>Delete</button>
+                      </div>
+                    </details>
+                  </div>
+                  <label className="page-label-inline">
+                    <span>Label</span>
+                    <input
+                      value={pages.find((page) => selectedPageIds.includes(page.id))?.label ?? ""}
+                      onChange={(event) => updateSelectedPageLabel(event.target.value)}
+                      placeholder="Cover, A-01..."
+                      disabled={isBusy}
+                    />
+                  </label>
                 </div>
               </>
             ) : null}
 
-            {leftPanel === "files" ? (
+            {leftPanel === "insert" ? (
               <div className="panel-empty">
-                <Files size={22} />
-                <strong>{pdfName}</strong>
+                <Plus size={22} />
+                <strong>Insert</strong>
                 <button className="button ghost" onClick={() => fileInput.current?.click()} disabled={isBusy} title="Open PDF" aria-label="Open PDF">
                   Open PDF
+                </button>
+                <button className="button ghost" onClick={() => setActivePageDialog("merge")} disabled={isBusy} title="Combine PDFs" aria-label="Combine PDFs">
+                  Combine PDFs
+                </button>
+                <button className="button ghost" onClick={() => setActivePageDialog("blank")} disabled={isBusy} title="Insert blank pages" aria-label="Insert blank pages">
+                  Blank pages
                 </button>
               </div>
             ) : null}
@@ -2522,6 +2467,9 @@ export function App() {
               <PanelRightClose size={16} />
             </button>
           </div>
+          <details className="inspector-section" open>
+            <summary>{selected ? "Selection" : activeTool === "draw" ? "Draw" : "Document"}</summary>
+            <div className="inspector-section-body">
           {activeTool === "draw" ? (
             <div className="control-stack pen-controls">
               <label>
@@ -3341,10 +3289,13 @@ export function App() {
               <p>Select an annotation or choose a tool to add content to the page.</p>
             </div>
           )}
+            </div>
+          </details>
 
-          <section className="comments-panel" aria-label="Comments">
+          <details className="comments-panel inspector-section" open aria-label="Comments">
+            <summary>Comments</summary>
+            <div className="comments-panel-body">
             <div className="comments-panel-header">
-              <h3>Comments</h3>
               <button
                 className="link-button"
                 onClick={() => setShowAllComments((value) => !value)}
@@ -3392,7 +3343,8 @@ export function App() {
                 <p className="muted-text">No comments match this view.</p>
               )}
             </div>
-          </section>
+            </div>
+          </details>
 
           <div className="document-stats">
             <div>
@@ -4107,6 +4059,41 @@ function ToolButton({
   );
 }
 
+function ToolbarMenu({ icon, label, children }: { icon: ReactElement; label: string; children: ReactElement | ReactElement[] }) {
+  return (
+    <details className="toolbar-menu">
+      <summary title={label} aria-label={label}>
+        {icon}
+        <span>{label}</span>
+      </summary>
+      <div className="toolbar-menu-panel" role="menu" aria-label={label}>
+        {children}
+      </div>
+    </details>
+  );
+}
+
+function MenuToolButton({
+  icon,
+  label,
+  active,
+  disabled,
+  onClick,
+}: {
+  icon: ReactElement;
+  label: string;
+  active?: boolean;
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <button className={`menu-tool-button ${active ? "active" : ""}`} onClick={onClick} disabled={disabled} role="menuitem" title={label} aria-label={label} aria-pressed={active}>
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
 function RailButton({
   icon,
   label,
@@ -4126,7 +4113,7 @@ function RailButton({
 }
 
 function getLeftPanelTitle(panel: LeftPanel) {
-  if (panel === "files") return "Files";
+  if (panel === "insert") return "Insert";
   if (panel === "bookmarks") return "Bookmarks";
   if (panel === "comments") return "Comments";
   if (panel === "search") return "Search";
