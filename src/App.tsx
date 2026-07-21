@@ -88,6 +88,22 @@ import {
   type ShapeStyle,
 } from "./shapes";
 import { AppChrome, type ThemeMode } from "./components/app-shell/AppChrome";
+import { collectProjectAssets, formatAssetSize } from "./projects/assets";
+import { createProjectMetadata, type ProjectMetadata } from "./projects/schema";
+import { buildProjectManifest, deserializeProject, serializeProject } from "./projects/serialization";
+import {
+  addRecentProject,
+  base64ToUint8,
+  clearAutosave,
+  inputToMetadataTags,
+  loadAutosave,
+  loadRecentProjects,
+  metadataTagsToInput,
+  removeRecentProject,
+  saveAutosave,
+  type ProjectAutosave,
+  type RecentProject,
+} from "./projects/storage";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -270,6 +286,13 @@ const initialMarks: Mark[] = [
 export function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredThemeMode());
   const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">(() => resolveThemeMode(getStoredThemeMode()));
+  const [hasOpenProject, setHasOpenProject] = useState(false);
+  const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
+  const [projectMetadata, setProjectMetadata] = useState<ProjectMetadata>(() => createProjectMetadata());
+  const [isProjectDirty, setIsProjectDirty] = useState(false);
+  const [savedProjectFingerprint, setSavedProjectFingerprint] = useState("");
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => loadRecentProjects());
+  const [autosaveCandidate, setAutosaveCandidate] = useState<ProjectAutosave | null>(() => loadAutosave());
   const [pdfName, setPdfName] = useState("Untitled document");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
@@ -333,6 +356,7 @@ export function App() {
   const [workState, setWorkState] = useState<WorkState | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const projectInput = useRef<HTMLInputElement>(null);
   const importPdfInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const signatureInput = useRef<HTMLInputElement>(null);
@@ -344,6 +368,12 @@ export function App() {
   const selectedPageCount = selectedPageIds.filter((id) => pages.some((page) => page.id === id)).length;
   const activePageIds = selectedPageIds.length > 0 ? selectedPageIds.filter((id) => pages.some((page) => page.id === id)) : currentPageView ? [currentPageView.id] : [];
   const pageAnnotations = useMemo(() => countAnnotationsByPageId(marks, pages), [marks, pages]);
+  const projectAssets = useMemo(() => collectProjectAssets(sourceDocuments, pages, marks), [sourceDocuments, pages, marks]);
+  const currentProjectFingerprint = useMemo(
+    () => getProjectFingerprint(projectId, projectMetadata, pages, marks, sourceDocuments, pdfName),
+    [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName]
+  );
+  const hasUnsavedChanges = hasOpenProject && (isProjectDirty || currentProjectFingerprint !== savedProjectFingerprint);
   const visibleComments = comments.filter((mark) => {
     if (!mark.comment) return false;
     return (showAllComments || mark.page === currentPage) && commentMatchesFilter(mark.comment.resolved, commentFilter);
@@ -382,6 +412,235 @@ export function App() {
     window.localStorage.setItem(THEME_STORAGE_KEY, mode);
   }
 
+  function getProjectSnapshotInput() {
+    return {
+      projectId,
+      metadata: projectMetadata,
+      pages,
+      annotations: marks,
+      sourceDocuments,
+      workspaceState: {
+        currentPage,
+        zoom,
+        activeWorkspace,
+        leftPanel,
+        selectedPageIds,
+      },
+      exportSettings: {
+        defaultFileName: pdfName.replace(/\.pdf$/i, "") || projectMetadata.name,
+      },
+    };
+  }
+
+  function createProjectFileBytes() {
+    return serializeProject(getProjectSnapshotInput());
+  }
+
+  function startNewProject() {
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Close the current project and discard unsaved changes?")) return;
+    const name = "Untitled project";
+    const blankPage = createBlankPageView(1, { width: 612, height: 792 });
+    setHasOpenProject(true);
+    setProjectId(crypto.randomUUID());
+    setProjectMetadata(createProjectMetadata(name));
+    setSavedProjectFingerprint("");
+    setPdfName(name);
+    setPdfBytes(null);
+    setPdfDoc(null);
+    setActiveSourceDocumentId(null);
+    setSourceDocuments({});
+    setPages([blankPage]);
+    setMarks([]);
+    setHistory({ past: [], future: [] });
+    setSelectedMark(null);
+    setSelectedPageIds([blankPage.id]);
+    setLastSelectedPageId(blankPage.id);
+    setCurrentPage(1);
+    setActiveWorkspace("organise");
+    setIsProjectDirty(true);
+    setErrorMessage("");
+  }
+
+  async function openProjectFile(file: File) {
+    try {
+      setErrorMessage("");
+      setWorkState({ message: `Opening ${file.name}`, progress: 15 });
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await loadProjectBytes(bytes, file.name);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(getProjectErrorMessage(error, "open"));
+    }
+  }
+
+  async function loadProjectBytes(bytes: Uint8Array, fileName = "Project.pproj") {
+    const bundle = deserializeProject(bytes);
+    const nextSources: Record<string, SourceDocument> = {};
+    for (const source of bundle.manifest.sources) {
+      const fileBytes = bundle.files[source.path];
+      if (!fileBytes) throw new Error(`Project is missing source asset: ${source.name}`);
+      nextSources[source.id] = { id: source.id, name: source.name, bytes: fileBytes };
+    }
+
+    const nextPages = renumberPages(bundle.manifest.pages as PageView[]);
+    const nextMarks = migrateMarksToPageIds(bundle.manifest.annotations as Mark[], nextPages);
+    const syncedMarks = syncMarksToPages(nextMarks, nextPages);
+    const firstSource = Object.values(nextSources)[0];
+    setHasOpenProject(true);
+    setProjectId(bundle.manifest.projectId);
+    setProjectMetadata(bundle.manifest.metadata);
+    setSavedProjectFingerprint(getProjectFingerprint(bundle.manifest.projectId, bundle.manifest.metadata, nextPages, syncedMarks, nextSources, bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, "")));
+    setPdfName(bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, ""));
+    setPdfBytes(firstSource?.bytes ?? null);
+    setPdfDoc(null);
+    setActiveSourceDocumentId(firstSource?.id ?? null);
+    setSourceDocuments(nextSources);
+    setPages(nextPages);
+    setMarks(syncedMarks);
+    setHistory({ past: [], future: [] });
+    setSelectedMark(null);
+    setCurrentPage(Math.min(Math.max(1, bundle.manifest.workspaceState.currentPage || 1), Math.max(1, nextPages.length)));
+    setZoom(bundle.manifest.workspaceState.zoom || 1);
+    setActiveWorkspace((bundle.manifest.workspaceState.activeWorkspace as WorkspaceMode) || "organise");
+    setLeftPanel((bundle.manifest.workspaceState.leftPanel as LeftPanel) || "pages");
+    const selectedIds = bundle.manifest.workspaceState.selectedPageIds.filter((id) => nextPages.some((page) => page.id === id));
+    setSelectedPageIds(selectedIds.length > 0 ? selectedIds : nextPages[0] ? [nextPages[0].id] : []);
+    setLastSelectedPageId(selectedIds[0] ?? nextPages[0]?.id ?? null);
+    setIsProjectDirty(false);
+    addRecentProject(bytes, bundle.manifest);
+    setRecentProjects(loadRecentProjects());
+  }
+
+  function handleProjectUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Open this project and discard unsaved changes in the current one?")) return;
+    void openProjectFile(file);
+  }
+
+  function saveProject() {
+    try {
+      setErrorMessage("");
+      const bytes = createProjectFileBytes();
+      const manifest = buildProjectManifest(getProjectSnapshotInput());
+      const filename = `${sanitizeFilename(projectMetadata.name || "publish-pro-project")}.pproj`;
+      downloadBytes(bytes, filename, "application/vnd.publish-pro.project+zip");
+      addRecentProject(bytes, manifest);
+      setRecentProjects(loadRecentProjects());
+      clearAutosave();
+      setAutosaveCandidate(null);
+      setIsProjectDirty(false);
+      setSavedProjectFingerprint(currentProjectFingerprint);
+    } catch (error) {
+      setErrorMessage(getProjectErrorMessage(error, "save"));
+    }
+  }
+
+  function saveProjectAs() {
+    saveProject();
+  }
+
+  function closeProject() {
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Close this project and discard unsaved changes?")) return;
+    setHasOpenProject(false);
+    setPdfName("Untitled document");
+    setPdfBytes(null);
+    setPdfDoc(null);
+    setActiveSourceDocumentId(null);
+    setSourceDocuments({});
+    setPages(demoPages);
+    setMarks(initialMarks);
+    setHistory({ past: [], future: [] });
+    setSelectedMark("demo-title");
+    setSelectedPageIds([demoPages[0].id]);
+    setLastSelectedPageId(demoPages[0].id);
+    setCurrentPage(1);
+    setIsProjectDirty(false);
+    setSavedProjectFingerprint("");
+    setErrorMessage("");
+  }
+
+  function restoreAutosave() {
+    if (!autosaveCandidate) return;
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Restore autosave and discard unsaved changes in the current project?")) return;
+    try {
+      void loadProjectBytes(base64ToUint8(autosaveCandidate.dataBase64), `${autosaveCandidate.manifest.metadata.name}.pproj`);
+    } catch (error) {
+      setErrorMessage(getProjectErrorMessage(error, "restore"));
+    }
+  }
+
+  function reopenRecentProject(project: RecentProject) {
+    if (!project.dataBase64) {
+      setErrorMessage("This recent project is too large to reopen from browser storage. Use Open Project and choose the .pproj file.");
+      return;
+    }
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Open this recent project and discard unsaved changes in the current one?")) return;
+    try {
+      void loadProjectBytes(base64ToUint8(project.dataBase64), `${project.name}.pproj`);
+    } catch (error) {
+      setErrorMessage(getProjectErrorMessage(error, "open"));
+    }
+  }
+
+  function updateProjectMetadata(patch: Partial<ProjectMetadata>) {
+    setProjectMetadata((metadata) => ({ ...metadata, ...patch, modifiedAt: new Date().toISOString() }));
+    if (patch.name) setPdfName(patch.name);
+    setIsProjectDirty(true);
+  }
+
+  function locateProjectAsset(assetId: string) {
+    const sourcePage = pages.find((page) => page.sourceDocumentId === assetId);
+    if (sourcePage) {
+      setCurrentPage(sourcePage.pageNumber);
+      setSelectedPageIds([sourcePage.id]);
+      setLastSelectedPageId(sourcePage.id);
+      setActiveWorkspace("organise");
+      return;
+    }
+    const mark = marks.find((item) => item.id === assetId);
+    if (mark) {
+      setCurrentPage(mark.page);
+      setSelectedMark(mark.id);
+      setActiveWorkspace(mark.kind === "comment" ? "review" : "edit");
+    }
+  }
+
+  function renameProjectAsset(assetId: string) {
+    const asset = projectAssets.find((item) => item.id === assetId);
+    if (!asset) return;
+    const nextName = window.prompt("Asset name", asset.name)?.trim();
+    if (!nextName || nextName === asset.name) return;
+    if (asset.type === "source-pdf") {
+      setSourceDocuments((existing) => ({
+        ...existing,
+        ...(existing[assetId] ? { [assetId]: { ...existing[assetId], name: nextName } } : {}),
+      }));
+    } else {
+      setMarks((existing) => existing.map((mark) => (mark.id === assetId ? { ...mark, imageName: nextName, text: nextName } : mark)));
+    }
+    setIsProjectDirty(true);
+  }
+
+  function removeUnusedAsset(assetId: string) {
+    const asset = projectAssets.find((item) => item.id === assetId);
+    if (!asset) return;
+    if (asset.usageCount > 0) {
+      setErrorMessage(`${asset.name} is currently used in this project. Remove or replace the object before deleting the asset.`);
+      return;
+    }
+    if (asset.type === "source-pdf") {
+      setSourceDocuments((existing) => {
+        const next = { ...existing };
+        delete next[assetId];
+        return next;
+      });
+      setIsProjectDirty(true);
+    }
+  }
+
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -398,6 +657,22 @@ export function App() {
     mediaQuery.addEventListener("change", applyTheme);
     return () => mediaQuery.removeEventListener("change", applyTheme);
   }, [themeMode]);
+
+  useEffect(() => {
+    if (!hasOpenProject) return undefined;
+    const timeout = window.setTimeout(() => {
+      try {
+        const bytes = createProjectFileBytes();
+        const manifest = buildProjectManifest(getProjectSnapshotInput());
+        saveAutosave(bytes, manifest);
+        setAutosaveCandidate(loadAutosave());
+      } catch {
+        // Autosave must never interrupt document editing.
+      }
+    }, 900);
+
+    return () => window.clearTimeout(timeout);
+  }, [hasOpenProject, projectId, projectMetadata, pages, marks, sourceDocuments, currentPage, zoom, activeWorkspace, leftPanel, selectedPageIds, pdfName]);
 
   function getPageByNumber(pageNumber: number) {
     return pages.find((page) => page.pageNumber === pageNumber) ?? pages[0];
@@ -651,8 +926,13 @@ export function App() {
       setWorkState({ message: "Checking PDF", progress: 20 });
       const loaded = await getDocument({ data: bytes.slice() }).promise;
       const sourceId = crypto.randomUUID();
+      const projectName = file.name.replace(/\.pdf$/i, "") || "Untitled project";
 
       setWorkState({ message: "Preparing pages", progress: 35 });
+      setHasOpenProject(true);
+      setProjectId(crypto.randomUUID());
+      setProjectMetadata(createProjectMetadata(projectName));
+      setIsProjectDirty(true);
       setPdfName(file.name);
       setPdfBytes(bytes);
       setSourceDocuments({ [sourceId]: { id: sourceId, name: file.name, bytes } });
@@ -2052,13 +2332,20 @@ export function App() {
         logoSrc={BRAND_ICON_SRC}
         documentName={pdfName}
         isBusy={isBusy}
-        hasUnsavedChanges={history.past.length > 0}
+        hasUnsavedChanges={hasUnsavedChanges}
         themeMode={themeMode}
         resolvedTheme={resolvedTheme}
         onThemeChange={changeThemeMode}
+        onNewProject={startNewProject}
+        onOpenProject={() => projectInput.current?.click()}
         onOpen={() => fileInput.current?.click()}
+        canSaveProject={hasOpenProject}
+        onSaveProject={saveProject}
+        onSaveProjectAs={saveProjectAs}
+        onCloseProject={closeProject}
         onExport={() => void exportPdf()}
       />
+      <input className="hidden-file-input" ref={projectInput} type="file" accept=".pproj,application/zip" onChange={handleProjectUpload} aria-label="Choose Publish Pro project file" />
       <input className="hidden-file-input" ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
       <input className="hidden-file-input" ref={importPdfInput} type="file" accept="application/pdf" multiple onChange={handleImportPdf} aria-label="Choose PDFs to import" />
       <input className="hidden-file-input" ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
@@ -2459,10 +2746,37 @@ export function App() {
 
             {activeWorkspace === "assemble" ? (
               <div className="workspace-panel-content">
+                <div className="project-quick-actions">
+                  <button className="button ghost" onClick={startNewProject} disabled={isBusy}>New</button>
+                  <button className="button ghost" onClick={() => projectInput.current?.click()} disabled={isBusy}>Open Project</button>
+                  <button className="button primary" onClick={saveProject} disabled={isBusy || !hasOpenProject}>Save</button>
+                </div>
                 <ToolCard icon={<Files />} title="Open PDF" description="Open a PDF as the working document." onClick={() => fileInput.current?.click()} />
                 <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => importPdfInput.current?.click()} />
-                <ToolCard icon={<Files />} title="Combine files" description="Review multiple PDFs before merging them." onClick={() => setActivePageDialog("merge")} />
-                <ToolCard icon={<BookOpen />} title="Bookmarks" description="Bookmark structure is prepared here as the project grows." onClick={() => setLeftPanel("bookmarks")} />
+                <ToolCard icon={<ImageIcon />} title="Add image asset" description="Add image artwork to the current page and project assets." onClick={() => { setActiveTool("image"); imageInput.current?.click(); }} />
+                <ToolCard icon={<PenLine />} title="Add signature asset" description="Add a local transparent PNG signature." onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} />
+                <div className="project-assets-panel">
+                  <div className="section-heading">
+                    <strong>Project assets</strong>
+                    <span>{projectAssets.length} items</span>
+                  </div>
+                  {projectAssets.length > 0 ? (
+                    projectAssets.map((asset) => (
+                      <div className="asset-row" key={asset.id}>
+                        <span className="asset-type">{asset.type.replace("-", " ")}</span>
+                        <strong>{asset.name}</strong>
+                        <small>{formatAssetSize(asset.size)} · {asset.usageCount} used</small>
+                        <div className="asset-actions">
+                          <button onClick={() => locateProjectAsset(asset.id)}>Locate</button>
+                          <button onClick={() => renameProjectAsset(asset.id)}>Rename</button>
+                          <button onClick={() => removeUnusedAsset(asset.id)} disabled={asset.usageCount > 0}>Remove unused</button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="muted-text">No embedded project assets yet.</p>
+                  )}
+                </div>
               </div>
             ) : null}
 
@@ -2542,6 +2856,11 @@ export function App() {
               event.preventDefault();
               setIsDragging(false);
               const files = Array.from(event.dataTransfer.files);
+              const projectFile = files.find((file) => file.name.toLowerCase().endsWith(".pproj"));
+              if (projectFile) {
+                void openProjectFile(projectFile);
+                return;
+              }
               const pdfFiles = files.filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
               const file = pdfFiles[0];
               if (!file) return;
@@ -2553,7 +2872,23 @@ export function App() {
             }}
           >
             {workState ? <ProgressOverlay message={workState.message} progress={workState.progress} /> : null}
-            {pages
+            {!hasOpenProject ? (
+              <WelcomeScreen
+                logoSrc={BRAND_ICON_SRC}
+                recentProjects={recentProjects}
+                autosave={autosaveCandidate}
+                onNewProject={startNewProject}
+                onOpenProject={() => projectInput.current?.click()}
+                onOpenPdf={() => fileInput.current?.click()}
+                onOpenRecent={reopenRecentProject}
+                onRemoveRecent={(id) => {
+                  removeRecentProject(id);
+                  setRecentProjects(loadRecentProjects());
+                }}
+                onRestoreAutosave={restoreAutosave}
+              />
+            ) : (
+            pages
               .filter((page) => page.pageNumber === currentPage)
               .map((page) => (
                 <DocumentPage
@@ -2582,7 +2917,8 @@ export function App() {
                   onSaveTextEdit={saveTextEdit}
                   onCancelTextEdit={cancelTextEdit}
                 />
-              ))}
+              ))
+            )}
           </div>
         </section>
 
@@ -2632,8 +2968,8 @@ export function App() {
           {activeWorkspace === "assemble" ? (
             <div className="control-stack workspace-properties">
               <div className="property-readout">
-                <span>Document</span>
-                <strong>{pdfName}</strong>
+                <span>Project</span>
+                <strong>{projectMetadata.name}</strong>
               </div>
               <div className="property-readout">
                 <span>Pages</span>
@@ -2643,8 +2979,39 @@ export function App() {
                 <span>Source files</span>
                 <strong>{Object.keys(sourceDocuments).length || 1}</strong>
               </div>
+              <label>
+                Project name
+                <input value={projectMetadata.name} onChange={(event) => updateProjectMetadata({ name: event.currentTarget.value })} />
+              </label>
+              <label>
+                Client
+                <input value={projectMetadata.client} onChange={(event) => updateProjectMetadata({ client: event.currentTarget.value })} />
+              </label>
+              <label>
+                Author
+                <input value={projectMetadata.author} onChange={(event) => updateProjectMetadata({ author: event.currentTarget.value })} />
+              </label>
+              <label>
+                Description
+                <textarea value={projectMetadata.description} onChange={(event) => updateProjectMetadata({ description: event.currentTarget.value })} rows={3} />
+              </label>
+              <label>
+                Tags
+                <input value={metadataTagsToInput(projectMetadata)} onChange={(event) => updateProjectMetadata({ tags: inputToMetadataTags(event.currentTarget.value) })} placeholder="bid, review, client" />
+              </label>
+              <div className="property-readout">
+                <span>Created</span>
+                <strong>{formatDateTime(projectMetadata.createdAt)}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Modified</span>
+                <strong>{formatDateTime(projectMetadata.modifiedAt)}</strong>
+              </div>
               <button className="button ghost full-width" onClick={() => setActivePageDialog("merge")} disabled={isBusy} title="Combine PDF files" aria-label="Combine PDF files">
                 Combine PDFs
+              </button>
+              <button className="button primary full-width" onClick={saveProject} disabled={isBusy || !hasOpenProject} title="Save Publish Pro project" aria-label="Save Publish Pro project">
+                Save Project
               </button>
             </div>
           ) : null}
@@ -4321,6 +4688,86 @@ function WorkspaceButton({
   );
 }
 
+type WelcomeScreenProps = {
+  logoSrc: string;
+  recentProjects: RecentProject[];
+  autosave: ProjectAutosave | null;
+  onNewProject: () => void;
+  onOpenProject: () => void;
+  onOpenPdf: () => void;
+  onOpenRecent: (project: RecentProject) => void;
+  onRemoveRecent: (id: string) => void;
+  onRestoreAutosave: () => void;
+};
+
+function WelcomeScreen({
+  logoSrc,
+  recentProjects,
+  autosave,
+  onNewProject,
+  onOpenProject,
+  onOpenPdf,
+  onOpenRecent,
+  onRemoveRecent,
+  onRestoreAutosave,
+}: WelcomeScreenProps) {
+  return (
+    <section className="welcome-screen" aria-label="Publish Pro welcome screen">
+      <div className="welcome-hero">
+        <img src={logoSrc} alt="" aria-hidden="true" />
+        <div>
+          <span>Publish Pro</span>
+          <h1>Document publishing workspace</h1>
+          <p>Create a project, open a PDF, or restore recent local work.</p>
+        </div>
+      </div>
+      <div className="welcome-actions" role="group" aria-label="Start options">
+        <button className="button primary" onClick={onNewProject}>
+          New Project
+        </button>
+        <button className="button ghost" onClick={onOpenProject}>
+          Open Project
+        </button>
+        <button className="button ghost" onClick={onOpenPdf}>
+          Open PDF
+        </button>
+      </div>
+      {autosave ? (
+        <button className="autosave-banner" onClick={onRestoreAutosave}>
+          <strong>Recover autosave</strong>
+          <span>{autosave.manifest.metadata.name} · {formatDateTime(autosave.savedAt)}</span>
+        </button>
+      ) : null}
+      <div className="welcome-drop-zone">
+        <Files size={28} />
+        <strong>Drop a PDF or .pproj file here</strong>
+        <span>Files stay local in your browser.</span>
+      </div>
+      <div className="recent-projects">
+        <div className="section-heading">
+          <strong>Recent Projects</strong>
+          <span>{recentProjects.length} saved locally</span>
+        </div>
+        {recentProjects.length > 0 ? (
+          recentProjects.map((project) => (
+            <div className="recent-project-row" key={project.id}>
+              <button onClick={() => onOpenRecent(project)}>
+                <strong>{project.name}</strong>
+                <span>{project.pageCount} pages · {formatDateTime(project.lastOpenedAt)}{project.sourceName ? ` · ${project.sourceName}` : ""}</span>
+              </button>
+              <button className="link-button" onClick={() => onRemoveRecent(project.id)} aria-label={`Remove ${project.name} from recent projects`}>
+                Remove
+              </button>
+            </div>
+          ))
+        ) : (
+          <p className="muted-text">Recent projects appear here after you save or open a `.pproj` file.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ToolCard({
   icon,
   title,
@@ -5357,13 +5804,69 @@ function normalizePageRotation(rotation: number) {
 }
 
 function downloadPdfBytes(bytes: Uint8Array, filename: string) {
-  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/pdf" });
+  downloadBytes(bytes, filename, "application/pdf");
+}
+
+function downloadBytes(bytes: Uint8Array, filename: string, mimeType: string) {
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function sanitizeFilename(value: string) {
+  return (value.trim() || "publish-pro-project").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").slice(0, 120);
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function getProjectErrorMessage(error: unknown, action: "open" | "save" | "restore") {
+  const detail = error instanceof Error ? error.message : "An unknown project error occurred.";
+  if (action === "save") return `Could not save the Publish Pro project. ${detail}`;
+  if (action === "restore") return `Could not restore the autosaved project. ${detail}`;
+  return `Could not open this Publish Pro project. ${detail}`;
+}
+
+function getProjectFingerprint(
+  projectId: string,
+  metadata: ProjectMetadata,
+  pages: PageView[],
+  marks: Mark[],
+  sourceDocuments: Record<string, SourceDocument>,
+  pdfName: string
+) {
+  return JSON.stringify({
+    projectId,
+    metadata,
+    pdfName,
+    pages: pages.map((page) => ({
+      id: page.id,
+      pageNumber: page.pageNumber,
+      sourceDocumentId: page.sourceDocumentId,
+      sourcePageNumber: page.sourcePageNumber,
+      width: page.width,
+      height: page.height,
+      rotation: page.rotation,
+      label: page.label,
+      isBlank: page.isBlank,
+      background: page.background,
+      imageUrl: page.imageUrl,
+      textItems: page.textItems,
+    })),
+    marks,
+    sources: Object.values(sourceDocuments).map((source) => ({
+      id: source.id,
+      name: source.name,
+      size: source.bytes.byteLength,
+    })),
+  });
 }
 
 function getSignaturePlacement(start: StrokePoint, current: StrokePoint, signature: PreparedImage) {

@@ -1,4 +1,4 @@
-import { Download, FolderOpen, Monitor, Moon, MoreHorizontal, Printer, Save, Sun } from "lucide-react";
+import { Download, FilePlus2, FolderOpen, Monitor, Moon, MoreHorizontal, Printer, Save, Sun, X } from "lucide-react";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -10,7 +10,13 @@ type AppChromeProps = {
   themeMode: ThemeMode;
   resolvedTheme: "light" | "dark";
   onThemeChange: (mode: ThemeMode) => void;
+  onNewProject: () => void;
+  onOpenProject: () => void;
   onOpen: () => void;
+  canSaveProject: boolean;
+  onSaveProject: () => void;
+  onSaveProjectAs: () => void;
+  onCloseProject: () => void;
   onExport: () => void;
 };
 
@@ -20,7 +26,23 @@ const themeOptions: Array<{ mode: ThemeMode; label: string; icon: typeof Sun }> 
   { mode: "system", label: "System", icon: Monitor },
 ];
 
-export function AppChrome({ logoSrc, documentName, isBusy, hasUnsavedChanges, themeMode, resolvedTheme, onThemeChange, onOpen, onExport }: AppChromeProps) {
+export function AppChrome({
+  logoSrc,
+  documentName,
+  isBusy,
+  hasUnsavedChanges,
+  themeMode,
+  resolvedTheme,
+  onThemeChange,
+  onNewProject,
+  onOpenProject,
+  onOpen,
+  canSaveProject,
+  onSaveProject,
+  onSaveProjectAs,
+  onCloseProject,
+  onExport,
+}: AppChromeProps) {
   return (
     <header className="app-chrome">
       <div className="app-identity">
@@ -32,11 +54,14 @@ export function AppChrome({ logoSrc, documentName, isBusy, hasUnsavedChanges, th
         {hasUnsavedChanges ? <span className="unsaved-indicator" aria-label="Unsaved changes">*</span> : null}
       </div>
       <div className="chrome-actions">
+        <button className="chrome-button icon-only" onClick={onNewProject} disabled={isBusy} title="New project" aria-label="New project">
+          <FilePlus2 size={16} />
+        </button>
         <button className="chrome-button" onClick={onOpen} disabled={isBusy} title="Open PDF" aria-label="Open PDF">
           <FolderOpen size={16} />
           <span>Open</span>
         </button>
-        <button className="chrome-button icon-only" disabled title="Save project is not available yet" aria-label="Save project unavailable">
+        <button className="chrome-button icon-only" onClick={onSaveProject} disabled={isBusy || !canSaveProject} title="Save project" aria-label="Save project">
           <Save size={16} />
         </button>
         <button className="chrome-button primary" onClick={onExport} disabled={isBusy} title="Export edited PDF" aria-label="Export edited PDF">
@@ -48,8 +73,12 @@ export function AppChrome({ logoSrc, documentName, isBusy, hasUnsavedChanges, th
             <MoreHorizontal size={16} />
           </summary>
           <div className="chrome-menu-panel">
+            <button onClick={onNewProject} disabled={isBusy}><FilePlus2 size={15} />New Project</button>
+            <button onClick={onOpenProject} disabled={isBusy}><FolderOpen size={15} />Open Project</button>
             <button onClick={onOpen} disabled={isBusy}><FolderOpen size={15} />Open PDF</button>
-            <button disabled><Save size={15} />Save project</button>
+            <button onClick={onSaveProject} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project</button>
+            <button onClick={onSaveProjectAs} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project As</button>
+            <button onClick={onCloseProject} disabled={isBusy || !canSaveProject}><X size={15} />Close Project</button>
             <button disabled><Printer size={15} />Print</button>
             <div className="appearance-menu" role="group" aria-label="Appearance">
               <span>Appearance</span>
