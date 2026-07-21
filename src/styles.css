@@ -401,6 +401,42 @@ button {
   pointer-events: none;
 }
 
+.text-layer {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  overflow: hidden;
+  color: rgb(15 23 42 / 0.01);
+  pointer-events: none;
+  user-select: none;
+}
+
+.document-page.text-selection-mode .text-layer {
+  pointer-events: auto;
+  user-select: text;
+}
+
+.text-layer span {
+  position: absolute;
+  overflow: hidden;
+  display: inline-block;
+  line-height: 1;
+  white-space: pre;
+  transform-origin: 0 0;
+}
+
+.text-layer span::selection {
+  background: rgb(37 99 235 / 0.28);
+}
+
+.text-selection-preview {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid rgb(37 99 235 / 0.75);
+  background: rgb(37 99 235 / 0.12);
+  pointer-events: none;
+}
+
 .blank-page {
   display: grid;
   place-content: center;
@@ -445,6 +481,22 @@ button {
 
 .mark-highlight {
   background: rgb(250 204 21 / 0.48);
+}
+
+.mark-textHighlight,
+.mark-underline,
+.mark-strikethrough {
+  z-index: 2;
+  overflow: visible;
+}
+
+.markup-mark-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
 }
 
 .mark-signature {

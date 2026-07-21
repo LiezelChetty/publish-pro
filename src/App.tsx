@@ -10,9 +10,11 @@ import {
   Redo2,
   Search,
   Stamp,
+  Strikethrough,
   TextCursorInput,
   Trash2,
   Undo2,
+  Underline,
   Upload,
   ZoomIn,
   ZoomOut,
@@ -26,11 +28,20 @@ import {
 } from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { ChangeEvent, PointerEvent, ReactElement, useEffect, useMemo, useRef, useState } from "react";
+import {
+  getMarkupBounds,
+  isTextMarkupKind,
+  moveMarkupRects,
+  normalizeSelectionRects,
+  scaleMarkupRect,
+  type MarkupRect,
+  type TextMarkupKind,
+} from "./textMarkup";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature";
-type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature";
+type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | TextMarkupKind;
+type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | TextMarkupKind;
 type WorkState = {
   message: string;
   progress?: number;
@@ -47,6 +58,16 @@ type PreparedImage = {
   name: string;
   width: number;
   height: number;
+};
+
+type TextItemView = {
+  id: string;
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fontSize: number;
 };
 
 type Mark = {
@@ -67,7 +88,9 @@ type Mark = {
   imageNaturalWidth?: number;
   imageNaturalHeight?: number;
   opacity?: number;
+  thickness?: number;
   lockAspectRatio?: boolean;
+  markupRects?: MarkupRect[];
   strokePoints?: StrokePoint[];
   strokeOpacity?: number;
 };
@@ -90,6 +113,7 @@ type PageView = {
   width: number;
   height: number;
   imageUrl: string;
+  textItems: TextItemView[];
 };
 
 const PAGE_SCALE = 1.35;
@@ -104,6 +128,7 @@ const demoPages: PageView[] = [
     width: 612,
     height: 792,
     imageUrl: "",
+    textItems: [],
   },
 ];
 
@@ -227,6 +252,23 @@ export function App() {
   }, [isBusy, selectedMark, marks]);
 
   useEffect(() => {
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (!isTextMarkupKind(activeTool)) return;
+
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      setActiveTool("select");
+    }
+
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [activeTool]);
+
+  useEffect(() => {
     if (!pdfDoc) return;
 
     let cancelled = false;
@@ -279,6 +321,7 @@ export function App() {
     canvas.width = viewport.width;
     canvas.height = viewport.height;
     await page.render({ canvasContext: context, viewport }).promise;
+    const textContent = await page.getTextContent();
 
     return {
       pageNumber: page.pageNumber,
@@ -286,6 +329,7 @@ export function App() {
       width: viewport.width,
       height: viewport.height,
       imageUrl: canvas.toDataURL("image/png"),
+      textItems: textContent.items.flatMap((item, index) => getTextItemView(item, index, viewport.transform)),
     };
   }
 
@@ -396,6 +440,7 @@ export function App() {
         width: 612,
         height: 792,
         imageUrl: "",
+        textItems: [],
       },
     ]);
     setCurrentPage(pageNumber);
@@ -412,6 +457,7 @@ export function App() {
       return;
     }
     if (activeTool === "draw") return;
+    if (isTextMarkupKind(activeTool)) return;
 
     const mark: Mark = {
       id: crypto.randomUUID(),
@@ -436,6 +482,31 @@ export function App() {
 
     commitMarks([...marks, mark], mark.id);
     setActiveTool("select");
+  }
+
+  function addTextMarkup(pageNumber: number, rects: MarkupRect[]) {
+    if (!isTextMarkupKind(activeTool)) return;
+    const bounds = getMarkupBounds(rects);
+    if (!bounds) return;
+
+    const mark: Mark = {
+      id: crypto.randomUUID(),
+      kind: activeTool,
+      page: pageNumber,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      text: getMarkupToolLabel(activeTool),
+      color: activeTool === "textHighlight" ? "#facc15" : "#d8342a",
+      size: 16,
+      rotation: 0,
+      opacity: activeTool === "textHighlight" ? 0.38 : 1,
+      thickness: activeTool === "textHighlight" ? undefined : 2,
+      markupRects: rects,
+    };
+
+    commitMarks([...marks, clampMarkToPage(mark, pages)], mark.id);
   }
 
   function placeSignature(pageNumber: number, x: number, y: number, width?: number, height?: number) {
@@ -666,6 +737,36 @@ export function App() {
           continue;
         }
 
+        if (isTextMarkupKind(mark.kind) && mark.markupRects && mark.markupRects.length > 0) {
+          for (const rect of mark.markupRects) {
+            const exportedRect = scaleMarkupRect(rect, sourcePage, { width, height });
+            if (mark.kind === "textHighlight") {
+              page.drawRectangle({
+                x: exportedRect.x,
+                y: exportedRect.y,
+                width: exportedRect.width,
+                height: exportedRect.height,
+                color: colorToRgb(mark.color),
+                opacity: mark.opacity ?? 0.38,
+              });
+              continue;
+            }
+
+            const lineY =
+              mark.kind === "underline"
+                ? exportedRect.y + Math.max(1, exportedRect.height * 0.12)
+                : exportedRect.y + Math.max(1, exportedRect.height * 0.52);
+            page.drawLine({
+              start: { x: exportedRect.x, y: lineY },
+              end: { x: exportedRect.x + exportedRect.width, y: lineY },
+              thickness: Math.max(0.5, ((mark.thickness ?? 2) / sourcePage.height) * height),
+              color: colorToRgb(mark.color),
+              opacity: mark.opacity ?? 1,
+            });
+          }
+          continue;
+        }
+
         if (mark.kind === "highlight") {
           page.drawRectangle({
             x,
@@ -789,7 +890,10 @@ export function App() {
           <nav className="toolstrip" aria-label="PDF tools">
             <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
             <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
-            <ToolButton icon={<Highlighter />} label="Add highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+            <ToolButton icon={<Highlighter />} label="Highlight selected text" active={activeTool === "textHighlight"} onClick={() => setActiveTool("textHighlight")} disabled={isBusy} />
+            <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
+            <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
+            <ToolButton icon={<Highlighter />} label="Add area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
             <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
             <ToolButton
               icon={<PenLine />}
@@ -862,6 +966,7 @@ export function App() {
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
                   onAddStroke={addStroke}
+                  onAddTextMarkup={addTextMarkup}
                   onPlaceSignature={placeSignature}
                   onPreviewMark={previewMark}
                   onCommitMarkChange={commitMarkChange}
@@ -940,15 +1045,17 @@ export function App() {
           ) : null}
           {selected ? (
             <div className="control-stack">
-              <label>
-                Content
-                <textarea
-                  value={selected.text}
-                  onChange={(event) => updateMark(selected.id, { text: event.target.value })}
-                  aria-label="Annotation content"
-                  disabled={selected.kind === "image" || selected.kind === "pngSignature"}
-                />
-              </label>
+              {!isTextMarkupKind(selected.kind) ? (
+                <label>
+                  Content
+                  <textarea
+                    value={selected.text}
+                    onChange={(event) => updateMark(selected.id, { text: event.target.value })}
+                    aria-label="Annotation content"
+                    disabled={selected.kind === "image" || selected.kind === "pngSignature"}
+                  />
+                </label>
+              ) : null}
               <label>
                 Color
                 <input
@@ -971,17 +1078,69 @@ export function App() {
                   aria-label="Annotation color hex"
                 />
               </label>
-              <label>
-                Size
-                <input
-                  type="range"
-                  min="10"
-                  max="42"
-                  value={selected.size}
-                  onChange={(event) => updateMark(selected.id, { size: Number(event.target.value) })}
-                  aria-label="Annotation text size"
-                />
-              </label>
+              {isTextMarkupKind(selected.kind) ? (
+                <>
+                  <label>
+                    Opacity
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                      value={selected.opacity ?? (selected.kind === "textHighlight" ? 0.38 : 1)}
+                      onChange={(event) => updateMark(selected.id, { opacity: Number(event.target.value) })}
+                      aria-label="Text markup opacity"
+                    />
+                  </label>
+                  <label>
+                    Opacity value
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                      value={selected.opacity ?? (selected.kind === "textHighlight" ? 0.38 : 1)}
+                      onChange={(event) => updateMark(selected.id, { opacity: clamp(Number(event.currentTarget.value), 0.1, 1) })}
+                      aria-label="Text markup opacity value"
+                    />
+                  </label>
+                  {selected.kind !== "textHighlight" ? (
+                    <label>
+                      Thickness
+                      <input
+                        type="number"
+                        min="0.5"
+                        max="12"
+                        step="0.5"
+                        value={selected.thickness ?? 2}
+                        onChange={(event) => updateMark(selected.id, { thickness: clamp(Number(event.currentTarget.value), 0.5, 12) })}
+                        aria-label="Text markup thickness"
+                      />
+                    </label>
+                  ) : null}
+                  <div className="inspector-actions">
+                    <button className="button ghost" onClick={duplicateSelectedMark} title="Duplicate text markup" aria-label="Duplicate text markup">
+                      Duplicate
+                    </button>
+                    <button className="button ghost" onClick={removeSelectedMark} title="Delete text markup" aria-label="Delete text markup">
+                      Delete
+                    </button>
+                  </div>
+                </>
+              ) : null}
+              {!isTextMarkupKind(selected.kind) ? (
+                <label>
+                  Size
+                  <input
+                    type="range"
+                    min="10"
+                    max="42"
+                    value={selected.size}
+                    onChange={(event) => updateMark(selected.id, { size: Number(event.target.value) })}
+                    aria-label="Annotation text size"
+                  />
+                </label>
+              ) : null}
               {selected.kind === "image" || selected.kind === "pngSignature" ? (
                 <>
                   <label>
@@ -1081,26 +1240,28 @@ export function App() {
                   </label>
                 </>
               ) : null}
-              <div className="dimension-grid">
-                <label>
-                  W
-                  <input
-                    type="number"
-                    value={Math.round(selected.width)}
-                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "width", Number(event.target.value)))}
-                    aria-label="Annotation width"
-                  />
-                </label>
-                <label>
-                  H
-                  <input
-                    type="number"
-                    value={Math.round(selected.height)}
-                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "height", Number(event.target.value)))}
-                    aria-label="Annotation height"
-                  />
-                </label>
-              </div>
+              {!isTextMarkupKind(selected.kind) ? (
+                <div className="dimension-grid">
+                  <label>
+                    W
+                    <input
+                      type="number"
+                      value={Math.round(selected.width)}
+                      onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "width", Number(event.target.value)))}
+                      aria-label="Annotation width"
+                    />
+                  </label>
+                  <label>
+                    H
+                    <input
+                      type="number"
+                      value={Math.round(selected.height)}
+                      onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "height", Number(event.target.value)))}
+                      aria-label="Annotation height"
+                    />
+                  </label>
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="empty-panel">
@@ -1138,6 +1299,7 @@ function DocumentPage({
   onSelect,
   onAddMark,
   onAddStroke,
+  onAddTextMarkup,
   onPlaceSignature,
   onPreviewMark,
   onCommitMarkChange,
@@ -1154,6 +1316,7 @@ function DocumentPage({
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
   onAddStroke: (page: number, points: StrokePoint[]) => void;
+  onAddTextMarkup: (page: number, rects: MarkupRect[]) => void;
   onPlaceSignature: (page: number, x: number, y: number, width?: number, height?: number) => void;
   onPreviewMark: (id: string, patch: Partial<Mark>) => void;
   onCommitMarkChange: (beforeMark: Mark, afterMark: Mark) => void;
@@ -1169,6 +1332,7 @@ function DocumentPage({
   } | null>(null);
   const [draftStroke, setDraftStroke] = useState<StrokePoint[]>([]);
   const [draftSignature, setDraftSignature] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
+  const [draftTextSelection, setDraftTextSelection] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
 
   function pagePoint(event: PointerEvent<HTMLDivElement>) {
     const bounds = pageRef.current?.getBoundingClientRect();
@@ -1179,14 +1343,57 @@ function DocumentPage({
     };
   }
 
+  function createMarkupFromSelection() {
+    if (!isTextMarkupKind(activeTool)) return;
+    const selection = window.getSelection();
+    const pageBounds = pageRef.current?.getBoundingClientRect();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !pageBounds) return;
+
+    const rects = normalizeSelectionRects(selection.getRangeAt(0).getClientRects(), pageBounds, zoom, page);
+    selection.removeAllRanges();
+    if (rects.length === 0) return;
+    onAddTextMarkup(page.pageNumber, rects);
+  }
+
+  function createMarkupFromDrag(start: StrokePoint, current: StrokePoint) {
+    if (!isTextMarkupKind(activeTool)) return;
+    if (Math.hypot(current.x - start.x, current.y - start.y) < 8) return;
+
+    const minX = Math.min(start.x, current.x);
+    const minY = Math.min(start.y, current.y);
+    const maxX = Math.max(start.x, current.x);
+    const maxY = Math.max(start.y, current.y);
+    const rects = page.textItems
+      .map((item) => {
+        const itemRight = item.x + item.width;
+        const itemBottom = item.y + item.height;
+        const intersects = itemRight >= minX && item.x <= maxX && itemBottom >= minY && item.y <= maxY;
+        if (!intersects) return null;
+
+        const x = clamp(Math.max(item.x, minX), 0, page.width);
+        const y = clamp(item.y, 0, page.height);
+        const width = clamp(Math.min(itemRight, maxX) - x, 0, page.width - x);
+        return { x, y, width, height: item.height };
+      })
+      .filter((rect): rect is MarkupRect => Boolean(rect && rect.width > 3 && rect.height > 3));
+
+    if (rects.length > 0) onAddTextMarkup(page.pageNumber, rects);
+  }
+
   return (
     <div
       ref={pageRef}
-      className="document-page"
+      className={`document-page ${isTextMarkupKind(activeTool) ? "text-selection-mode" : ""}`}
       style={{ width: page.width * zoom, height: page.height * zoom }}
       onPointerDown={(event) => {
         if ((event.target as HTMLElement).closest(".mark")) return;
         const point = pagePoint(event);
+        if (isTextMarkupKind(activeTool)) {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          onSelect(null);
+          setDraftTextSelection({ start: point, current: point });
+          return;
+        }
         if (activeTool === "draw") {
           event.currentTarget.setPointerCapture(event.pointerId);
           onSelect(null);
@@ -1215,6 +1422,10 @@ function DocumentPage({
               setDraftSignature((existing) => (existing ? { ...existing, current: pagePoint(event) } : existing));
               return;
             }
+            if (draftTextSelection) {
+              setDraftTextSelection((existing) => (existing ? { ...existing, current: pagePoint(event) } : existing));
+              return;
+            }
             const drag = dragRef.current;
             if (!drag) return;
             const activeMark = marks.find((mark) => mark.id === drag.before.id);
@@ -1236,6 +1447,17 @@ function DocumentPage({
           onAddStroke(page.pageNumber, nextStroke);
           return;
         }
+        if (isTextMarkupKind(activeTool)) {
+          if (draftTextSelection) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+            createMarkupFromDrag(draftTextSelection.start, pagePoint(event));
+            setDraftTextSelection(null);
+            window.getSelection()?.removeAllRanges();
+            return;
+          }
+          window.setTimeout(createMarkupFromSelection, 0);
+          return;
+        }
         if (draftSignature && pendingSignature) {
           event.currentTarget.releasePointerCapture(event.pointerId);
           const placement = getSignaturePlacement(draftSignature.start, pagePoint(event), pendingSignature);
@@ -1251,6 +1473,7 @@ function DocumentPage({
       }}
       onPointerLeave={() => {
         if (draftStroke.length > 0) return;
+        if (draftTextSelection) return;
         const drag = dragRef.current;
         dragRef.current = null;
         if (drag && !areMarksEqual([drag.before], [drag.latest])) {
@@ -1259,6 +1482,31 @@ function DocumentPage({
       }}
     >
       {page.imageUrl ? <img className="pdf-image" src={page.imageUrl} alt={`Page ${page.pageNumber}`} /> : <BlankPage />}
+      {page.textItems.length > 0 ? (
+        <div className="text-layer" aria-hidden="true">
+          {page.textItems.map((item) => (
+            <span
+              key={item.id}
+              style={{
+                left: item.x * zoom,
+                top: item.y * zoom,
+                width: item.width * zoom,
+                height: item.height * zoom,
+                fontSize: item.fontSize * zoom,
+              }}
+            >
+              {item.text}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {draftTextSelection ? (
+        <div
+          className="text-selection-preview"
+          aria-hidden="true"
+          style={getDraftSelectionStyle(draftTextSelection.start, draftTextSelection.current, zoom)}
+        />
+      ) : null}
       {draftStroke.length > 0 ? (
         <svg className="draft-stroke-layer" viewBox={`0 0 ${page.width} ${page.height}`} aria-hidden="true">
           <path
@@ -1311,6 +1559,42 @@ function DocumentPage({
             };
           }}
         >
+          {isTextMarkupKind(mark.kind) && mark.markupRects ? (
+            <svg className="markup-mark-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
+              {mark.markupRects.map((rect, index) => {
+                const relativeX = rect.x - mark.x;
+                const relativeY = rect.y - mark.y;
+                if (mark.kind === "textHighlight") {
+                  return (
+                    <rect
+                      key={`${mark.id}-${index}`}
+                      x={relativeX}
+                      y={relativeY}
+                      width={rect.width}
+                      height={rect.height}
+                      fill={mark.color}
+                      opacity={mark.opacity ?? 0.38}
+                    />
+                  );
+                }
+
+                const lineY = relativeY + rect.height * (mark.kind === "underline" ? 0.88 : 0.5);
+                return (
+                  <line
+                    key={`${mark.id}-${index}`}
+                    x1={relativeX}
+                    y1={lineY}
+                    x2={relativeX + rect.width}
+                    y2={lineY}
+                    stroke={mark.color}
+                    strokeLinecap="round"
+                    strokeWidth={mark.thickness ?? 2}
+                    opacity={mark.opacity ?? 1}
+                  />
+                );
+              })}
+            </svg>
+          ) : null}
           {(mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl ? (
             <img
               className="image-mark-media"
@@ -1332,7 +1616,7 @@ function DocumentPage({
               />
             </svg>
           ) : null}
-          {mark.kind !== "highlight" && mark.kind !== "image" && mark.kind !== "pngSignature" && mark.kind !== "stroke" ? mark.text : ""}
+          {mark.kind !== "highlight" && mark.kind !== "image" && mark.kind !== "pngSignature" && mark.kind !== "stroke" && !isTextMarkupKind(mark.kind) ? mark.text : ""}
           {(mark.kind === "image" || mark.kind === "pngSignature") && selectedMark === mark.id
             ? (["nw", "ne", "sw", "se"] as const).map((corner) => (
                 <span
@@ -1411,6 +1695,57 @@ function colorToRgb(hex: string) {
   const green = ((bigint >> 8) & 255) / 255;
   const blue = (bigint & 255) / 255;
   return rgb(red, green, blue);
+}
+
+function getTextItemView(item: unknown, index: number, viewportTransform: number[]): TextItemView[] {
+  if (!isPdfTextItem(item)) return [];
+
+  const transform = multiplyMatrix(viewportTransform, item.transform);
+  const fontSize = Math.max(1, Math.hypot(transform[2], transform[3]));
+  const width = Math.max(1, item.width * PAGE_SCALE);
+  const height = Math.max(1, fontSize);
+
+  return [
+    {
+      id: `text-${index}`,
+      text: item.str,
+      x: transform[4],
+      y: transform[5] - height,
+      width,
+      height,
+      fontSize,
+    },
+  ];
+}
+
+function isPdfTextItem(item: unknown): item is { str: string; transform: number[]; width: number } {
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    "str" in item &&
+    "transform" in item &&
+    "width" in item &&
+    typeof (item as { str: unknown }).str === "string" &&
+    Array.isArray((item as { transform: unknown }).transform) &&
+    typeof (item as { width: unknown }).width === "number"
+  );
+}
+
+function multiplyMatrix(left: number[], right: number[]) {
+  return [
+    left[0] * right[0] + left[2] * right[1],
+    left[1] * right[0] + left[3] * right[1],
+    left[0] * right[2] + left[2] * right[3],
+    left[1] * right[2] + left[3] * right[3],
+    left[0] * right[4] + left[2] * right[5] + left[4],
+    left[1] * right[4] + left[3] * right[5] + left[5],
+  ];
+}
+
+function getMarkupToolLabel(kind: TextMarkupKind) {
+  if (kind === "textHighlight") return "Text highlight";
+  if (kind === "underline") return "Underline";
+  return "Strikethrough";
 }
 
 function dataUrlToBytes(dataUrl: string) {
@@ -1560,12 +1895,15 @@ function getImageAspectRatio(mark: Pick<Mark, "width" | "height" | "imageNatural
 }
 
 function duplicateMark(mark: Mark, page: number) {
+  const offset = 18;
   return {
     ...mark,
     id: crypto.randomUUID(),
     page,
-    x: mark.x + 18,
-    y: mark.y + 18,
+    x: mark.x + offset,
+    y: mark.y + offset,
+    markupRects: mark.markupRects?.map((rect) => ({ ...rect, x: rect.x + offset, y: rect.y + offset })),
+    strokePoints: mark.strokePoints?.map((point) => ({ x: point.x + offset, y: point.y + offset })),
   };
 }
 
@@ -1600,6 +1938,17 @@ function scalePlacement(placement: ReturnType<typeof getSignaturePlacement>, zoo
     top: placement.y * zoom,
     width: (placement.width ?? 0) * zoom,
     height: (placement.height ?? 0) * zoom,
+  };
+}
+
+function getDraftSelectionStyle(start: StrokePoint, current: StrokePoint, zoom: number) {
+  const x = Math.min(start.x, current.x);
+  const y = Math.min(start.y, current.y);
+  return {
+    left: x * zoom,
+    top: y * zoom,
+    width: Math.abs(current.x - start.x) * zoom,
+    height: Math.abs(current.y - start.y) * zoom,
   };
 }
 
@@ -1681,6 +2030,14 @@ function getDimensionPatch(mark: Mark, dimension: "width" | "height", value: num
 }
 
 function moveMarkBy(mark: Mark, dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
+  if (isTextMarkupKind(mark.kind) && mark.markupRects) {
+    const page = pages.find((item) => item.pageNumber === mark.page);
+    if (!page) return mark;
+    const movedRects = moveMarkupRects(mark.markupRects, dx, dy, page);
+    const bounds = getMarkupBounds(movedRects ?? []);
+    return bounds ? { ...mark, ...bounds, markupRects: movedRects } : mark;
+  }
+
   if (mark.kind !== "stroke" || !mark.strokePoints) {
     return clampMarkToPage({ ...mark, x: mark.x + dx, y: mark.y + dy }, pages);
   }
@@ -1784,7 +2141,9 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       mark.imageNaturalWidth === other.imageNaturalWidth &&
       mark.imageNaturalHeight === other.imageNaturalHeight &&
       mark.opacity === other.opacity &&
+      mark.thickness === other.thickness &&
       mark.lockAspectRatio === other.lockAspectRatio &&
+      JSON.stringify(mark.markupRects ?? []) === JSON.stringify(other.markupRects ?? []) &&
       mark.strokeOpacity === other.strokeOpacity &&
       JSON.stringify(mark.strokePoints ?? []) === JSON.stringify(other.strokePoints ?? [])
     );
@@ -1793,6 +2152,9 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
 
 function getMarkLabel(mark: Mark) {
   if (mark.kind === "stroke") return "Freehand stroke annotation";
+  if (mark.kind === "textHighlight") return "Text highlight annotation";
+  if (mark.kind === "underline") return "Underline annotation";
+  if (mark.kind === "strikethrough") return "Strikethrough annotation";
   if (mark.kind === "pngSignature") return `PNG signature annotation: ${mark.imageName || mark.text || "Signature"}`;
   if (mark.kind === "image") return `Image annotation: ${mark.imageName || mark.text || "Image"}`;
   if (mark.kind === "highlight") return "Highlight annotation";
