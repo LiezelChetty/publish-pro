@@ -29,8 +29,8 @@ import { ChangeEvent, PointerEvent, ReactElement, useEffect, useMemo, useRef, us
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw";
-type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke";
+type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature";
+type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature";
 type WorkState = {
   message: string;
   progress?: number;
@@ -39,6 +39,14 @@ type WorkState = {
 type StrokePoint = {
   x: number;
   y: number;
+};
+
+type PreparedImage = {
+  dataUrl: string;
+  mimeType: "image/png" | "image/jpeg";
+  name: string;
+  width: number;
+  height: number;
 };
 
 type Mark = {
@@ -58,6 +66,8 @@ type Mark = {
   imageName?: string;
   imageNaturalWidth?: number;
   imageNaturalHeight?: number;
+  opacity?: number;
+  lockAspectRatio?: boolean;
   strokePoints?: StrokePoint[];
   strokeOpacity?: number;
 };
@@ -138,6 +148,8 @@ export function App() {
   const [penColor, setPenColor] = useState("#111827");
   const [penWidth, setPenWidth] = useState(4);
   const [penOpacity, setPenOpacity] = useState(1);
+  const [pendingSignature, setPendingSignature] = useState<PreparedImage | null>(null);
+  const [copiedMark, setCopiedMark] = useState<Mark | null>(null);
   const [selectedMark, setSelectedMark] = useState<string | null>("demo-title");
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
@@ -146,6 +158,7 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
+  const signatureInput = useRef<HTMLInputElement>(null);
 
   const selected = marks.find((mark) => mark.id === selectedMark) ?? null;
   const isBusy = workState !== null;
@@ -165,6 +178,8 @@ export function App() {
       const key = event.key.toLowerCase();
       const isUndo = key === "z" && !event.shiftKey;
       const isRedo = (key === "z" && event.shiftKey) || key === "y";
+      const isCopy = key === "c" && !event.shiftKey && !isEditableElement(event.target);
+      const isPaste = key === "v" && !event.shiftKey && !isEditableElement(event.target);
 
       if (isUndo && history.past.length > 0) {
         event.preventDefault();
@@ -175,6 +190,16 @@ export function App() {
         event.preventDefault();
         redo();
       }
+
+      if (isCopy && selected) {
+        event.preventDefault();
+        setCopiedMark(selected);
+      }
+
+      if (isPaste && copiedMark) {
+        event.preventDefault();
+        pasteCopiedMark();
+      }
     }
 
     window.addEventListener("keydown", handleKeyboardShortcut);
@@ -182,7 +207,7 @@ export function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyboardShortcut);
     };
-  }, [history, isBusy]);
+  }, [history, isBusy, selected, copiedMark, currentPage, marks, pages]);
 
   useEffect(() => {
     function handleDeleteShortcut(event: KeyboardEvent) {
@@ -340,6 +365,27 @@ export function App() {
     }
   }
 
+  async function handleSignatureUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      setErrorMessage("");
+      setWorkState({ message: `Preparing signature ${file.name}`, progress: 20 });
+      const signature = await preparePngSignature(file);
+      setPendingSignature(signature);
+      setActiveTool("pngSignature");
+      setSelectedMark(null);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setPendingSignature(null);
+      setActiveTool("select");
+      setErrorMessage(getSignatureErrorMessage(error));
+    }
+  }
+
   function addPage() {
     const pageNumber = pages.length + 1;
     setPages((existing) => [
@@ -359,6 +405,10 @@ export function App() {
     if (activeTool === "select") return;
     if (activeTool === "image") {
       imageInput.current?.click();
+      return;
+    }
+    if (activeTool === "pngSignature") {
+      signatureInput.current?.click();
       return;
     }
     if (activeTool === "draw") return;
@@ -385,6 +435,39 @@ export function App() {
     };
 
     commitMarks([...marks, mark], mark.id);
+    setActiveTool("select");
+  }
+
+  function placeSignature(pageNumber: number, x: number, y: number, width?: number, height?: number) {
+    if (!pendingSignature) return;
+    const page = pages.find((item) => item.pageNumber === pageNumber) ?? pages[0];
+    const defaultSize = getDefaultImageMarkSize(pendingSignature, page, 0.32, 0.18);
+    const aspectRatio = pendingSignature.width / pendingSignature.height || 1;
+    const markWidth = Math.max(24, width ?? defaultSize.width);
+    const markHeight = Math.max(12, height ?? markWidth / aspectRatio);
+    const mark: Mark = {
+      id: crypto.randomUUID(),
+      kind: "pngSignature",
+      page: pageNumber,
+      x: width === undefined ? x - markWidth / 2 : x,
+      y: height === undefined ? y - markHeight / 2 : y,
+      width: markWidth,
+      height: markHeight,
+      text: pendingSignature.name,
+      color: "#111827",
+      size: 16,
+      rotation: 0,
+      imageDataUrl: pendingSignature.dataUrl,
+      imageMimeType: "image/png",
+      imageName: pendingSignature.name,
+      imageNaturalWidth: pendingSignature.width,
+      imageNaturalHeight: pendingSignature.height,
+      opacity: 1,
+      lockAspectRatio: true,
+    };
+
+    commitMarks([...marks, clampMarkToPage(mark, pages)], mark.id);
+    setPendingSignature(null);
     setActiveTool("select");
   }
 
@@ -429,6 +512,18 @@ export function App() {
   function removeSelectedMark() {
     if (!selectedMark) return;
     commitMarks(marks.filter((mark) => mark.id !== selectedMark), null);
+  }
+
+  function duplicateSelectedMark() {
+    if (!selected) return;
+    const duplicate = duplicateMark(selected, currentPage);
+    commitMarks([...marks, clampMarkToPage(duplicate, pages)], duplicate.id);
+  }
+
+  function pasteCopiedMark() {
+    if (!copiedMark) return;
+    const pasted = duplicateMark(copiedMark, currentPage);
+    commitMarks([...marks, clampMarkToPage(pasted, pages)], pasted.id);
   }
 
   function duplicatePage() {
@@ -520,7 +615,7 @@ export function App() {
         const markHeight = (mark.height / sourcePage.height) * height;
         const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
 
-        if (mark.kind === "image" && mark.imageDataUrl) {
+        if ((mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl) {
           const imageBytes = dataUrlToBytes(mark.imageDataUrl);
           const embeddedImage =
             mark.imageMimeType === "image/jpeg" ? await exportedPdf.embedJpg(imageBytes) : await exportedPdf.embedPng(imageBytes);
@@ -536,6 +631,7 @@ export function App() {
             width: markWidth,
             height: markHeight,
             rotate: degrees(mark.rotation),
+            opacity: mark.opacity ?? 1,
           });
           continue;
         }
@@ -648,6 +744,7 @@ export function App() {
           </button>
           <input ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
           <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
+          <input ref={signatureInput} type="file" accept="image/png" onChange={handleSignatureUpload} aria-label="Choose PNG signature file" />
         </div>
       </header>
 
@@ -694,6 +791,16 @@ export function App() {
             <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
             <ToolButton icon={<Highlighter />} label="Add highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
             <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
+            <ToolButton
+              icon={<PenLine />}
+              label="Upload PNG signature"
+              active={activeTool === "pngSignature"}
+              onClick={() => {
+                setActiveTool("pngSignature");
+                signatureInput.current?.click();
+              }}
+              disabled={isBusy}
+            />
             <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
             <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
             <ToolButton
@@ -751,9 +858,11 @@ export function App() {
                   penColor={penColor}
                   penWidth={penWidth}
                   penOpacity={penOpacity}
+                  pendingSignature={pendingSignature}
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
                   onAddStroke={addStroke}
+                  onPlaceSignature={placeSignature}
                   onPreviewMark={previewMark}
                   onCommitMarkChange={commitMarkChange}
                 />
@@ -837,7 +946,7 @@ export function App() {
                   value={selected.text}
                   onChange={(event) => updateMark(selected.id, { text: event.target.value })}
                   aria-label="Annotation content"
-                  disabled={selected.kind === "image"}
+                  disabled={selected.kind === "image" || selected.kind === "pngSignature"}
                 />
               </label>
               <label>
@@ -873,7 +982,7 @@ export function App() {
                   aria-label="Annotation text size"
                 />
               </label>
-              {selected.kind === "image" ? (
+              {selected.kind === "image" || selected.kind === "pngSignature" ? (
                 <>
                   <label>
                     Rotation
@@ -883,7 +992,7 @@ export function App() {
                       max="180"
                       value={selected.rotation}
                       onChange={(event) => updateMark(selected.id, { rotation: Number(event.target.value) })}
-                      aria-label="Image rotation"
+                      aria-label={selected.kind === "pngSignature" ? "Signature rotation" : "Image rotation"}
                     />
                   </label>
                   <label>
@@ -894,9 +1003,54 @@ export function App() {
                       max="180"
                       value={Math.round(selected.rotation)}
                       onChange={(event) => updateMark(selected.id, { rotation: Number(event.target.value) })}
-                      aria-label="Image rotation degrees"
+                      aria-label={selected.kind === "pngSignature" ? "Signature rotation degrees" : "Image rotation degrees"}
                     />
                   </label>
+                </>
+              ) : null}
+              {selected.kind === "pngSignature" ? (
+                <>
+                  <label>
+                    Opacity
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                      value={selected.opacity ?? 1}
+                      onChange={(event) => updateMark(selected.id, { opacity: Number(event.target.value) })}
+                      aria-label="Signature opacity"
+                    />
+                  </label>
+                  <label>
+                    Opacity value
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                      value={selected.opacity ?? 1}
+                      onChange={(event) => updateMark(selected.id, { opacity: clamp(Number(event.currentTarget.value), 0.1, 1) })}
+                      aria-label="Signature opacity value"
+                    />
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={selected.lockAspectRatio !== false}
+                      onChange={(event) => updateMark(selected.id, { lockAspectRatio: event.currentTarget.checked })}
+                      aria-label="Lock signature aspect ratio"
+                    />
+                    Lock aspect ratio
+                  </label>
+                  <div className="inspector-actions">
+                    <button className="button ghost" onClick={duplicateSelectedMark} title="Duplicate signature" aria-label="Duplicate signature">
+                      Duplicate
+                    </button>
+                    <button className="button ghost" onClick={removeSelectedMark} title="Delete signature" aria-label="Delete signature">
+                      Delete
+                    </button>
+                  </div>
                 </>
               ) : null}
               {selected.kind === "stroke" ? (
@@ -933,7 +1087,7 @@ export function App() {
                   <input
                     type="number"
                     value={Math.round(selected.width)}
-                    onChange={(event) => updateMark(selected.id, { width: Number(event.target.value) })}
+                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "width", Number(event.target.value)))}
                     aria-label="Annotation width"
                   />
                 </label>
@@ -942,7 +1096,7 @@ export function App() {
                   <input
                     type="number"
                     value={Math.round(selected.height)}
-                    onChange={(event) => updateMark(selected.id, { height: Number(event.target.value) })}
+                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "height", Number(event.target.value)))}
                     aria-label="Annotation height"
                   />
                 </label>
@@ -980,9 +1134,11 @@ function DocumentPage({
   penColor,
   penWidth,
   penOpacity,
+  pendingSignature,
   onSelect,
   onAddMark,
   onAddStroke,
+  onPlaceSignature,
   onPreviewMark,
   onCommitMarkChange,
 }: {
@@ -994,9 +1150,11 @@ function DocumentPage({
   penColor: string;
   penWidth: number;
   penOpacity: number;
+  pendingSignature: PreparedImage | null;
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
   onAddStroke: (page: number, points: StrokePoint[]) => void;
+  onPlaceSignature: (page: number, x: number, y: number, width?: number, height?: number) => void;
   onPreviewMark: (id: string, patch: Partial<Mark>) => void;
   onCommitMarkChange: (beforeMark: Mark, afterMark: Mark) => void;
 }) {
@@ -1010,6 +1168,7 @@ function DocumentPage({
     corner?: "nw" | "ne" | "sw" | "se";
   } | null>(null);
   const [draftStroke, setDraftStroke] = useState<StrokePoint[]>([]);
+  const [draftSignature, setDraftSignature] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
 
   function pagePoint(event: PointerEvent<HTMLDivElement>) {
     const bounds = pageRef.current?.getBoundingClientRect();
@@ -1034,12 +1193,26 @@ function DocumentPage({
           setDraftStroke([point]);
           return;
         }
+        if (activeTool === "pngSignature") {
+          if (!pendingSignature) {
+            onAddMark(page.pageNumber, point.x, point.y);
+            return;
+          }
+          event.currentTarget.setPointerCapture(event.pointerId);
+          onSelect(null);
+          setDraftSignature({ start: point, current: point });
+          return;
+        }
         onSelect(null);
         onAddMark(page.pageNumber, point.x, point.y);
       }}
           onPointerMove={(event) => {
             if (draftStroke.length > 0) {
               setDraftStroke((existing) => [...existing, pagePoint(event)]);
+              return;
+            }
+            if (draftSignature) {
+              setDraftSignature((existing) => (existing ? { ...existing, current: pagePoint(event) } : existing));
               return;
             }
             const drag = dragRef.current;
@@ -1061,6 +1234,13 @@ function DocumentPage({
           const nextStroke = [...draftStroke, pagePoint(event)];
           setDraftStroke([]);
           onAddStroke(page.pageNumber, nextStroke);
+          return;
+        }
+        if (draftSignature && pendingSignature) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+          const placement = getSignaturePlacement(draftSignature.start, pagePoint(event), pendingSignature);
+          setDraftSignature(null);
+          onPlaceSignature(page.pageNumber, placement.x, placement.y, placement.width, placement.height);
           return;
         }
         const drag = dragRef.current;
@@ -1092,6 +1272,17 @@ function DocumentPage({
           />
         </svg>
       ) : null}
+      {draftSignature && pendingSignature ? (
+        <div
+          className="signature-placement-preview"
+          aria-hidden="true"
+          style={{
+            ...scalePlacement(getSignaturePlacement(draftSignature.start, draftSignature.current, pendingSignature), zoom),
+          }}
+        >
+          <img src={pendingSignature.dataUrl} alt="" />
+        </div>
+      ) : null}
       {marks.map((mark) => (
         <button
           className={`mark mark-${mark.kind} ${selectedMark === mark.id ? "selected" : ""}`}
@@ -1120,7 +1311,14 @@ function DocumentPage({
             };
           }}
         >
-          {mark.kind === "image" && mark.imageDataUrl ? <img className="image-mark-media" src={mark.imageDataUrl} alt={mark.imageName || "Image annotation"} /> : null}
+          {(mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl ? (
+            <img
+              className="image-mark-media"
+              src={mark.imageDataUrl}
+              alt={mark.kind === "pngSignature" ? mark.imageName || "PNG signature annotation" : mark.imageName || "Image annotation"}
+              style={{ opacity: mark.opacity ?? 1 }}
+            />
+          ) : null}
           {mark.kind === "stroke" && mark.strokePoints ? (
             <svg className="stroke-mark-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
               <path
@@ -1134,8 +1332,8 @@ function DocumentPage({
               />
             </svg>
           ) : null}
-          {mark.kind !== "highlight" && mark.kind !== "image" && mark.kind !== "stroke" ? mark.text : ""}
-          {mark.kind === "image" && selectedMark === mark.id
+          {mark.kind !== "highlight" && mark.kind !== "image" && mark.kind !== "pngSignature" && mark.kind !== "stroke" ? mark.text : ""}
+          {(mark.kind === "image" || mark.kind === "pngSignature") && selectedMark === mark.id
             ? (["nw", "ne", "sw", "se"] as const).map((corner) => (
                 <span
                   className={`resize-handle handle-${corner}`}
@@ -1226,6 +1424,27 @@ function dataUrlToBytes(dataUrl: string) {
   return bytes;
 }
 
+async function preparePngSignature(file: File): Promise<PreparedImage> {
+  if (file.type !== "image/png" && !file.name.toLowerCase().endsWith(".png")) {
+    throw new Error("Unsupported signature type.");
+  }
+
+  const originalDataUrl = await readFileAsDataUrl(file);
+  const signatureBytes = dataUrlToBytes(originalDataUrl);
+  if (!isPngBytes(signatureBytes)) {
+    throw new Error("Invalid PNG signature.");
+  }
+
+  const dimensions = await getImageDimensions(originalDataUrl);
+  return {
+    dataUrl: originalDataUrl,
+    mimeType: "image/png",
+    name: file.name,
+    width: dimensions.width,
+    height: dimensions.height,
+  };
+}
+
 async function prepareImageAnnotation(file: File) {
   const supportedTypes = ["image/png", "image/jpeg", "image/svg+xml", "image/webp"];
   if (!supportedTypes.includes(file.type)) {
@@ -1263,6 +1482,11 @@ async function prepareImageAnnotation(file: File) {
     width: dimensions.width,
     height: dimensions.height,
   };
+}
+
+function isPngBytes(bytes: Uint8Array) {
+  const pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+  return pngSignature.every((value, index) => bytes[index] === value);
 }
 
 function readFileAsDataUrl(file: File) {
@@ -1320,6 +1544,65 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+function getDefaultImageMarkSize(image: Pick<PreparedImage, "width" | "height">, page: Pick<PageView, "width" | "height">, maxWidthRatio = 0.36, maxHeightRatio = 0.28) {
+  const maxWidth = page.width * maxWidthRatio;
+  const maxHeight = page.height * maxHeightRatio;
+  const scale = Math.min(maxWidth / image.width, maxHeight / image.height, 1);
+  return {
+    width: Math.max(48, image.width * scale),
+    height: Math.max(24, image.height * scale),
+  };
+}
+
+function getImageAspectRatio(mark: Pick<Mark, "width" | "height" | "imageNaturalWidth" | "imageNaturalHeight">) {
+  if (mark.imageNaturalWidth && mark.imageNaturalHeight) return mark.imageNaturalWidth / mark.imageNaturalHeight;
+  return mark.width / mark.height || 1;
+}
+
+function duplicateMark(mark: Mark, page: number) {
+  return {
+    ...mark,
+    id: crypto.randomUUID(),
+    page,
+    x: mark.x + 18,
+    y: mark.y + 18,
+  };
+}
+
+function getSignaturePlacement(start: StrokePoint, current: StrokePoint, signature: PreparedImage) {
+  const dx = current.x - start.x;
+  const dy = current.y - start.y;
+  const distance = Math.hypot(dx, dy);
+  const aspectRatio = signature.width / signature.height || 1;
+
+  if (distance < 8) {
+    return { x: start.x, y: start.y, width: undefined, height: undefined };
+  }
+
+  let width = Math.max(24, Math.abs(dx));
+  let height = Math.max(12, width / aspectRatio);
+  if (Math.abs(dy) > height) {
+    height = Math.abs(dy);
+    width = height * aspectRatio;
+  }
+
+  return {
+    x: dx < 0 ? start.x - width : start.x,
+    y: dy < 0 ? start.y - height : start.y,
+    width,
+    height,
+  };
+}
+
+function scalePlacement(placement: ReturnType<typeof getSignaturePlacement>, zoom: number) {
+  return {
+    left: placement.x * zoom,
+    top: placement.y * zoom,
+    width: (placement.width ?? 0) * zoom,
+    height: (placement.height ?? 0) * zoom,
+  };
+}
+
 function normalizeHexColor(value: string) {
   const trimmed = value.trim();
   const prefixed = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
@@ -1336,6 +1619,7 @@ function clampMarkToPage(mark: Mark, pages: Pick<PageView, "pageNumber" | "width
     ...mark,
     width,
     height,
+    opacity: mark.opacity === undefined ? undefined : clamp(mark.opacity, 0.1, 1),
     rotation: normalizeRotation(mark.rotation),
     x: clamp(mark.x, 0, Math.max(0, page.width - width)),
     y: clamp(mark.y, 0, Math.max(0, page.height - height)),
@@ -1343,6 +1627,24 @@ function clampMarkToPage(mark: Mark, pages: Pick<PageView, "pageNumber" | "width
 }
 
 function resizeMarkFromCorner(mark: Mark, corner: "nw" | "ne" | "sw" | "se", dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
+  if (mark.kind === "pngSignature" && mark.lockAspectRatio === false) {
+    const nextWidth = Math.max(24, mark.width + (corner.includes("w") ? -dx : dx));
+    const nextHeight = Math.max(12, mark.height + (corner.includes("n") ? -dy : dy));
+    const nextX = corner.includes("w") ? mark.x + mark.width - nextWidth : mark.x;
+    const nextY = corner.includes("n") ? mark.y + mark.height - nextHeight : mark.y;
+
+    return clampMarkToPage(
+      {
+        ...mark,
+        x: nextX,
+        y: nextY,
+        width: nextWidth,
+        height: nextHeight,
+      },
+      pages
+    );
+  }
+
   const aspectRatio = mark.width / mark.height || 1;
   const horizontalDelta = corner.includes("w") ? -dx : dx;
   const verticalDelta = corner.includes("n") ? -dy : dy;
@@ -1362,6 +1664,20 @@ function resizeMarkFromCorner(mark: Mark, corner: "nw" | "ne" | "sw" | "se", dx:
     },
     pages
   );
+}
+
+function getDimensionPatch(mark: Mark, dimension: "width" | "height", value: number) {
+  const nextValue = Math.max(1, value);
+  if (mark.kind !== "pngSignature" || mark.lockAspectRatio === false) {
+    return { [dimension]: nextValue };
+  }
+
+  const aspectRatio = getImageAspectRatio(mark);
+  if (dimension === "width") {
+    return { width: nextValue, height: Math.max(1, nextValue / aspectRatio) };
+  }
+
+  return { height: nextValue, width: Math.max(1, nextValue * aspectRatio) };
 }
 
 function moveMarkBy(mark: Mark, dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
@@ -1467,6 +1783,8 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       mark.imageName === other.imageName &&
       mark.imageNaturalWidth === other.imageNaturalWidth &&
       mark.imageNaturalHeight === other.imageNaturalHeight &&
+      mark.opacity === other.opacity &&
+      mark.lockAspectRatio === other.lockAspectRatio &&
       mark.strokeOpacity === other.strokeOpacity &&
       JSON.stringify(mark.strokePoints ?? []) === JSON.stringify(other.strokePoints ?? [])
     );
@@ -1475,6 +1793,7 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
 
 function getMarkLabel(mark: Mark) {
   if (mark.kind === "stroke") return "Freehand stroke annotation";
+  if (mark.kind === "pngSignature") return `PNG signature annotation: ${mark.imageName || mark.text || "Signature"}`;
   if (mark.kind === "image") return `Image annotation: ${mark.imageName || mark.text || "Image"}`;
   if (mark.kind === "highlight") return "Highlight annotation";
   if (mark.kind === "signature") return `Signature annotation: ${mark.text}`;
@@ -1511,6 +1830,14 @@ function getImageErrorMessage(error: unknown) {
     return "Please choose a PNG, JPG, SVG, or WebP image.";
   }
   return "The image could not be added. Please choose a valid PNG, JPG, SVG, or WebP file.";
+}
+
+function getSignatureErrorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.toLowerCase().includes("unsupported")) {
+    return "Please choose a PNG signature file. Other image formats are not supported for signatures.";
+  }
+  return "The signature could not be added. Please choose a valid PNG file.";
 }
 
 function normalizeRotation(value: number) {
