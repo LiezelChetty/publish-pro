@@ -104,6 +104,22 @@ button {
   font-weight: 700;
 }
 
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.button:focus-visible,
+.tool-button:focus-visible,
+.thumb:focus-visible,
+.mark:focus-visible,
+.searchbox input:focus-visible,
+.control-stack textarea:focus-visible,
+.control-stack input:focus-visible {
+  outline: 3px solid rgb(37 99 235 / 0.72);
+  outline-offset: 2px;
+}
+
 .button.primary {
   background: #d8342a;
   color: #fff;
@@ -218,19 +234,35 @@ button {
 
 .editor {
   display: grid;
-  grid-template-rows: 56px minmax(0, 1fr);
+  grid-template-rows: 56px auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: #eef1f5;
 }
 
 .toolstrip {
+  grid-row: 1;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 14px;
   border-bottom: 1px solid #d8dde7;
   background: #fbfcfd;
+}
+
+.status-message {
+  grid-row: 2;
+  margin: 10px 14px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.status-message.error {
+  border: 1px solid #f3b0aa;
+  background: #fff1f0;
+  color: #9f1d16;
 }
 
 .tool-button {
@@ -277,11 +309,55 @@ button {
 }
 
 .canvas-stage {
+  position: relative;
+  grid-row: 3;
   overflow: auto;
   display: grid;
   place-items: start center;
   min-height: 0;
   padding: 38px;
+}
+
+.progress-overlay {
+  position: sticky;
+  z-index: 10;
+  top: 22px;
+  display: grid;
+  place-items: center;
+  width: min(360px, 100%);
+  margin-bottom: 18px;
+  pointer-events: none;
+}
+
+.progress-panel {
+  display: grid;
+  width: 100%;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #cfd6e2;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgb(23 32 51 / 0.16);
+}
+
+.progress-panel strong {
+  color: #243044;
+  font-size: 13px;
+}
+
+.progress-track {
+  overflow: hidden;
+  height: 8px;
+  border-radius: 999px;
+  background: #e5e9f0;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #d8342a;
+  transition: width 160ms ease;
 }
 
 .canvas-stage.dragging {

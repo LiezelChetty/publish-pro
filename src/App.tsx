@@ -6,7 +6,6 @@ import {
   MousePointer2,
   PenLine,
   Plus,
-  RotateCw,
   Search,
   Stamp,
   TextCursorInput,
@@ -29,6 +28,10 @@ GlobalWorkerOptions.workerSrc = pdfWorker;
 
 type Tool = "select" | "text" | "highlight" | "signature" | "stamp";
 type MarkKind = "text" | "highlight" | "signature" | "stamp";
+type WorkState = {
+  message: string;
+  progress?: number;
+};
 
 type Mark = {
   id: string;
@@ -102,9 +105,12 @@ export function App() {
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [workState, setWorkState] = useState<WorkState | null>(null);
+  const [errorMessage, setErrorMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   const selected = marks.find((mark) => mark.id === selectedMark) ?? null;
+  const isBusy = workState !== null;
   const filteredPages = useMemo(() => {
     if (!query.trim()) return pages;
     const normalized = query.trim().toLowerCase();
@@ -118,15 +124,31 @@ export function App() {
     const activePdf = pdfDoc;
 
     async function renderPages() {
-      const nextPages: PageView[] = [];
-      for (let index = 1; index <= activePdf.numPages; index += 1) {
-        const page = await activePdf.getPage(index);
-        const rendered = await renderPage(page);
+      try {
+        setErrorMessage("");
+        const nextPages: PageView[] = [];
+        for (let index = 1; index <= activePdf.numPages; index += 1) {
+          setWorkState({
+            message: `Rendering page ${index} of ${activePdf.numPages}`,
+            progress: ((index - 1) / activePdf.numPages) * 100,
+          });
+          const page = await activePdf.getPage(index);
+          const rendered = await renderPage(page);
+          if (cancelled) return;
+          nextPages.push(rendered);
+          setWorkState({
+            message: `Rendering page ${index} of ${activePdf.numPages}`,
+            progress: (index / activePdf.numPages) * 100,
+          });
+        }
+        setPages(nextPages);
+        setCurrentPage(1);
+        setWorkState(null);
+      } catch (error) {
         if (cancelled) return;
-        nextPages.push(rendered);
+        setWorkState(null);
+        setErrorMessage(getPdfErrorMessage(error, "render"));
       }
-      setPages(nextPages);
-      setCurrentPage(1);
     }
 
     renderPages();
@@ -159,15 +181,29 @@ export function App() {
   }
 
   async function loadFile(file: File) {
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    const loaded = await getDocument({ data: bytes.slice() }).promise;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      setErrorMessage("Please choose a PDF file.");
+      return;
+    }
 
-    setPdfName(file.name);
-    setPdfBytes(bytes);
-    setPdfDoc(loaded);
-    setMarks([]);
-    setSelectedMark(null);
+    try {
+      setErrorMessage("");
+      setWorkState({ message: `Opening ${file.name}`, progress: 5 });
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      setWorkState({ message: "Checking PDF", progress: 20 });
+      const loaded = await getDocument({ data: bytes.slice() }).promise;
+
+      setWorkState({ message: "Preparing pages", progress: 35 });
+      setPdfName(file.name);
+      setPdfBytes(bytes);
+      setPdfDoc(loaded);
+      setMarks([]);
+      setSelectedMark(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(getPdfErrorMessage(error, "upload"));
+    }
   }
 
   function handleUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -244,91 +280,84 @@ export function App() {
     setCurrentPage(nextNumber);
   }
 
-  function rotateCurrentPage() {
-    const pageMarks = marks.filter((mark) => mark.page === currentPage);
-    const page = pages.find((item) => item.pageNumber === currentPage);
-    if (!page) return;
-
-    setMarks((existing) =>
-      existing.map((mark) => {
-        if (!pageMarks.some((item) => item.id === mark.id)) return mark;
-        return {
-          ...mark,
-          x: Math.max(24, page.width - mark.x - mark.width),
-          y: Math.max(24, mark.y),
-        };
-      })
-    );
-  }
-
   async function exportPdf() {
-    const exportedPdf = pdfBytes ? await PDFDocument.load(pdfBytes) : await PDFDocument.create();
-    const sourcePdf = pdfBytes ? await PDFDocument.load(pdfBytes) : null;
-    const helvetica = await exportedPdf.embedFont(StandardFonts.Helvetica);
-    const helveticaBold = await exportedPdf.embedFont(StandardFonts.HelveticaBold);
+    try {
+      setErrorMessage("");
+      setWorkState({ message: "Preparing export", progress: 10 });
+      const exportedPdf = pdfBytes ? await PDFDocument.load(pdfBytes) : await PDFDocument.create();
+      const sourcePdf = pdfBytes ? await PDFDocument.load(pdfBytes) : null;
+      const helvetica = await exportedPdf.embedFont(StandardFonts.Helvetica);
+      const helveticaBold = await exportedPdf.embedFont(StandardFonts.HelveticaBold);
 
-    while (exportedPdf.getPageCount() < pages.length) {
-      const pageView = pages[exportedPdf.getPageCount()];
-      if (sourcePdf && pageView.sourcePageNumber) {
-        const [copiedPage] = await exportedPdf.copyPages(sourcePdf, [pageView.sourcePageNumber - 1]);
-        exportedPdf.addPage(copiedPage);
-      } else {
-        exportedPdf.addPage([612, 792]);
+      while (exportedPdf.getPageCount() < pages.length) {
+        const pageView = pages[exportedPdf.getPageCount()];
+        if (sourcePdf && pageView.sourcePageNumber) {
+          const [copiedPage] = await exportedPdf.copyPages(sourcePdf, [pageView.sourcePageNumber - 1]);
+          exportedPdf.addPage(copiedPage);
+        } else {
+          exportedPdf.addPage([612, 792]);
+        }
       }
-    }
 
-    marks.forEach((mark) => {
-      const page = exportedPdf.getPage(mark.page - 1);
-      const sourcePage = pages.find((item) => item.pageNumber === mark.page);
-      if (!sourcePage) return;
+      marks.forEach((mark, index) => {
+        setWorkState({ message: "Applying annotations", progress: 20 + (index / Math.max(1, marks.length)) * 60 });
+        const page = exportedPdf.getPage(mark.page - 1);
+        const sourcePage = pages.find((item) => item.pageNumber === mark.page);
+        if (!sourcePage) return;
 
-      const { width, height } = page.getSize();
-      const x = (mark.x / sourcePage.width) * width;
-      const y = height - ((mark.y + mark.height) / sourcePage.height) * height;
-      const markWidth = (mark.width / sourcePage.width) * width;
-      const markHeight = (mark.height / sourcePage.height) * height;
-      const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
+        const { width, height } = page.getSize();
+        const x = (mark.x / sourcePage.width) * width;
+        const y = height - ((mark.y + mark.height) / sourcePage.height) * height;
+        const markWidth = (mark.width / sourcePage.width) * width;
+        const markHeight = (mark.height / sourcePage.height) * height;
+        const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
 
-      if (mark.kind === "highlight") {
-        page.drawRectangle({
-          x,
-          y,
-          width: markWidth,
-          height: markHeight,
-          color: rgb(0.98, 0.8, 0.15),
-          opacity: 0.45,
+        if (mark.kind === "highlight") {
+          page.drawRectangle({
+            x,
+            y,
+            width: markWidth,
+            height: markHeight,
+            color: colorToRgb(mark.color),
+            opacity: 0.45,
+          });
+          return;
+        }
+
+        if (mark.kind === "stamp") {
+          page.drawRectangle({
+            x,
+            y,
+            width: markWidth,
+            height: markHeight,
+            borderColor: colorToRgb(mark.color),
+            borderWidth: 2,
+          });
+        }
+
+        page.drawText(mark.text || " ", {
+          x: x + (mark.kind === "stamp" ? 10 : 0),
+          y: y + Math.max(4, markHeight / 3),
+          size: markSize,
+          font: mark.kind === "stamp" ? helveticaBold : helvetica,
+          color: colorToRgb(mark.color),
         });
-        return;
-      }
-
-      if (mark.kind === "stamp") {
-        page.drawRectangle({
-          x,
-          y,
-          width: markWidth,
-          height: markHeight,
-          borderColor: rgb(0.85, 0.16, 0.13),
-          borderWidth: 2,
-        });
-      }
-
-      page.drawText(mark.text || " ", {
-        x: x + (mark.kind === "stamp" ? 10 : 0),
-        y: y + Math.max(4, markHeight / 3),
-        size: markSize,
-        font: mark.kind === "stamp" ? helveticaBold : helvetica,
-        color: colorToRgb(mark.color),
       });
-    });
 
-    const exported = await exportedPdf.save();
-    const blob = new Blob([exported.buffer as ArrayBuffer], { type: "application/pdf" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = pdfName.replace(/\.pdf$/i, "") + "-edited.pdf";
-    anchor.click();
-    URL.revokeObjectURL(url);
+      setWorkState({ message: "Saving PDF", progress: 90 });
+      const exported = await exportedPdf.save();
+      const blob = new Blob([exported.buffer as ArrayBuffer], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = pdfName.replace(/\.pdf$/i, "") + "-edited.pdf";
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(getPdfErrorMessage(error, "export"));
+    }
   }
 
   return (
@@ -343,15 +372,21 @@ export function App() {
         </div>
 
         <div className="topbar-actions">
-          <button className="button ghost" onClick={() => fileInput.current?.click()}>
+          <button
+            className="button ghost"
+            onClick={() => fileInput.current?.click()}
+            disabled={isBusy}
+            title="Upload a PDF"
+            aria-label="Upload a PDF"
+          >
             <Upload size={18} />
             Upload
           </button>
-          <button className="button primary" onClick={() => void exportPdf()}>
+          <button className="button primary" onClick={() => void exportPdf()} disabled={isBusy} title="Export edited PDF" aria-label="Export edited PDF">
             <Download size={18} />
             Export PDF
           </button>
-          <input ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} />
+          <input ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
         </div>
       </header>
 
@@ -359,7 +394,7 @@ export function App() {
         <aside className="left-rail">
           <div className="searchbox">
             <Search size={16} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find page" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find page" aria-label="Find page" />
           </div>
 
           <div className="page-list">
@@ -368,6 +403,9 @@ export function App() {
                 className={`thumb ${currentPage === page.pageNumber ? "active" : ""}`}
                 key={page.pageNumber}
                 onClick={() => setCurrentPage(page.pageNumber)}
+                title={`Go to page ${page.pageNumber}`}
+                aria-label={`Go to page ${page.pageNumber}`}
+                aria-current={currentPage === page.pageNumber ? "page" : undefined}
               >
                 <div className="thumb-page">
                   {page.imageUrl ? <img src={page.imageUrl} alt="" /> : <FilePlus2 size={32} />}
@@ -378,11 +416,11 @@ export function App() {
           </div>
 
           <div className="page-actions">
-            <button className="button ghost" onClick={addPage}>
+            <button className="button ghost" onClick={addPage} disabled={isBusy} title="Add a blank page" aria-label="Add a blank page">
               <Plus size={17} />
               Add page
             </button>
-            <button className="button ghost" onClick={duplicatePage}>
+            <button className="button ghost" onClick={duplicatePage} disabled={isBusy} title="Duplicate current page" aria-label="Duplicate current page">
               <FilePlus2 size={17} />
               Duplicate
             </button>
@@ -391,19 +429,24 @@ export function App() {
 
         <section className="editor">
           <nav className="toolstrip" aria-label="PDF tools">
-            <ToolButton icon={<MousePointer2 />} label="Select" active={activeTool === "select"} onClick={() => setActiveTool("select")} />
-            <ToolButton icon={<TextCursorInput />} label="Text" active={activeTool === "text"} onClick={() => setActiveTool("text")} />
-            <ToolButton icon={<Highlighter />} label="Highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} />
-            <ToolButton icon={<PenLine />} label="Sign" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} />
-            <ToolButton icon={<Stamp />} label="Stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} />
+            <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
+            <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
+            <ToolButton icon={<Highlighter />} label="Add highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+            <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
+            <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
             <div className="tool-divider" />
-            <ToolButton icon={<RotateCw />} label="Reposition" onClick={rotateCurrentPage} />
-            <ToolButton icon={<Trash2 />} label="Delete" onClick={removeSelectedMark} disabled={!selectedMark} />
+            <ToolButton icon={<Trash2 />} label="Delete selected annotation" onClick={removeSelectedMark} disabled={!selectedMark || isBusy} />
             <div className="tool-divider" />
-            <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} />
+            <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} />
             <span className="zoom-label">{Math.round(zoom * 100)}%</span>
-            <ToolButton icon={<ZoomIn />} label="Zoom in" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} />
+            <ToolButton icon={<ZoomIn />} label="Zoom in" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} disabled={isBusy} />
           </nav>
+
+          {errorMessage ? (
+            <div className="status-message error" role="alert">
+              {errorMessage}
+            </div>
+          ) : null}
 
           <div
             className={`canvas-stage ${isDragging ? "dragging" : ""}`}
@@ -416,9 +459,10 @@ export function App() {
               event.preventDefault();
               setIsDragging(false);
               const file = event.dataTransfer.files[0];
-              if (file?.type === "application/pdf") void loadFile(file);
+              if (file) void loadFile(file);
             }}
           >
+            {workState ? <ProgressOverlay message={workState.message} progress={workState.progress} /> : null}
             {pages
               .filter((page) => page.pageNumber === currentPage)
               .map((page) => (
@@ -442,11 +486,21 @@ export function App() {
             <div className="control-stack">
               <label>
                 Content
-                <textarea value={selected.text} onChange={(event) => updateMark(selected.id, { text: event.target.value })} />
+                <textarea
+                  value={selected.text}
+                  onChange={(event) => updateMark(selected.id, { text: event.target.value })}
+                  aria-label="Annotation content"
+                />
               </label>
               <label>
                 Color
-                <input type="color" value={selected.color} onChange={(event) => updateMark(selected.id, { color: event.target.value })} />
+                <input
+                  type="color"
+                  value={selected.color}
+                  onChange={(event) => updateMark(selected.id, { color: event.currentTarget.value })}
+                  onInput={(event) => updateMark(selected.id, { color: event.currentTarget.value })}
+                  aria-label="Annotation color"
+                />
               </label>
               <label>
                 Size
@@ -456,6 +510,7 @@ export function App() {
                   max="42"
                   value={selected.size}
                   onChange={(event) => updateMark(selected.id, { size: Number(event.target.value) })}
+                  aria-label="Annotation text size"
                 />
               </label>
               <div className="dimension-grid">
@@ -465,6 +520,7 @@ export function App() {
                     type="number"
                     value={Math.round(selected.width)}
                     onChange={(event) => updateMark(selected.id, { width: Number(event.target.value) })}
+                    aria-label="Annotation width"
                   />
                 </label>
                 <label>
@@ -473,6 +529,7 @@ export function App() {
                     type="number"
                     value={Math.round(selected.height)}
                     onChange={(event) => updateMark(selected.id, { height: Number(event.target.value) })}
+                    aria-label="Annotation height"
                   />
                 </label>
               </div>
@@ -540,16 +597,18 @@ function DocumentPage({
         onSelect(null);
         onAddMark(page.pageNumber, point.x, point.y);
       }}
-      onPointerMove={(event) => {
-        const drag = dragRef.current;
-        if (!drag) return;
-        const dx = (event.clientX - drag.startX) / zoom;
-        const dy = (event.clientY - drag.startY) / zoom;
-        onUpdateMark(drag.id, {
-          x: Math.max(0, drag.markX + dx),
-          y: Math.max(0, drag.markY + dy),
-        });
-      }}
+          onPointerMove={(event) => {
+            const drag = dragRef.current;
+            if (!drag) return;
+            const activeMark = marks.find((mark) => mark.id === drag.id);
+            if (!activeMark) return;
+            const dx = (event.clientX - drag.startX) / zoom;
+            const dy = (event.clientY - drag.startY) / zoom;
+            onUpdateMark(drag.id, {
+              x: clamp(drag.markX + dx, 0, Math.max(0, page.width - activeMark.width)),
+              y: clamp(drag.markY + dy, 0, Math.max(0, page.height - activeMark.height)),
+            });
+          }}
       onPointerUp={() => {
         dragRef.current = null;
       }}
@@ -562,6 +621,8 @@ function DocumentPage({
         <button
           className={`mark mark-${mark.kind} ${selectedMark === mark.id ? "selected" : ""}`}
           key={mark.id}
+          title={getMarkLabel(mark)}
+          aria-label={getMarkLabel(mark)}
           style={{
             left: mark.x * zoom,
             top: mark.y * zoom,
@@ -569,6 +630,7 @@ function DocumentPage({
             height: mark.height * zoom,
             color: mark.color,
             fontSize: mark.size * zoom,
+            backgroundColor: mark.kind === "highlight" ? hexToRgba(mark.color, 0.48) : undefined,
           }}
           onPointerDown={(event) => {
             event.stopPropagation();
@@ -612,9 +674,22 @@ function ToolButton({
   onClick: () => void;
 }) {
   return (
-    <button className={`tool-button ${active ? "active" : ""}`} onClick={onClick} disabled={disabled} title={label} aria-label={label}>
+    <button className={`tool-button ${active ? "active" : ""}`} onClick={onClick} disabled={disabled} title={label} aria-label={label} aria-pressed={active}>
       {icon}
     </button>
+  );
+}
+
+function ProgressOverlay({ message, progress }: WorkState) {
+  return (
+    <div className="progress-overlay" role="status" aria-live="polite">
+      <div className="progress-panel">
+        <strong>{message}</strong>
+        <div className="progress-track" aria-label={progress === undefined ? message : `${Math.round(progress)}% complete`}>
+          <span style={{ width: `${clamp(progress ?? 100, 0, 100)}%` }} />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -625,4 +700,47 @@ function colorToRgb(hex: string) {
   const green = ((bigint >> 8) & 255) / 255;
   const blue = (bigint & 255) / 255;
   return rgb(red, green, blue);
+}
+
+function hexToRgba(hex: string, alpha: number) {
+  const clean = hex.replace("#", "");
+  const bigint = Number.parseInt(clean, 16);
+  const red = (bigint >> 16) & 255;
+  const green = (bigint >> 8) & 255;
+  const blue = bigint & 255;
+  return `rgb(${red} ${green} ${blue} / ${alpha})`;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getMarkLabel(mark: Mark) {
+  if (mark.kind === "highlight") return "Highlight annotation";
+  if (mark.kind === "signature") return `Signature annotation: ${mark.text}`;
+  if (mark.kind === "stamp") return `Stamp annotation: ${mark.text}`;
+  return `Text annotation: ${mark.text}`;
+}
+
+function getPdfErrorMessage(error: unknown, phase: "upload" | "render" | "export") {
+  const raw = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  const details = raw.toLowerCase();
+
+  if (details.includes("password") || details.includes("encrypted")) {
+    return "This PDF is encrypted or password protected. Please unlock it and upload it again.";
+  }
+
+  if (details.includes("invalid") || details.includes("corrupt") || details.includes("damaged")) {
+    return "This PDF appears to be corrupted or invalid. Please try a different PDF file.";
+  }
+
+  if (phase === "render") {
+    return "The PDF opened, but one or more pages could not be rendered. Please try a different PDF or export it again from the source app.";
+  }
+
+  if (phase === "export") {
+    return "The edited PDF could not be exported. Please check the document and try again.";
+  }
+
+  return "The PDF could not be opened. Please choose a valid, unencrypted PDF file.";
 }
