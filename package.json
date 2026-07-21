@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "validate:pdf": "node scripts/validate-export.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

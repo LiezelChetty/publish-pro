@@ -42,7 +42,7 @@ import {
   type PDFPageProxy,
 } from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
-import { ChangeEvent, PointerEvent, ReactElement, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, PointerEvent, ReactElement, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   commentMatchesFilter,
   createCommentData,
@@ -151,10 +151,16 @@ type Mark = {
 };
 
 type HistoryEntry = {
-  before: Mark[];
-  after: Mark[];
+  pagesBefore: PageView[];
+  pagesAfter: PageView[];
+  marksBefore: Mark[];
+  marksAfter: Mark[];
   selectedBefore: string | null;
   selectedAfter: string | null;
+  currentPageBefore: number;
+  currentPageAfter: number;
+  selectedPageIdsBefore: string[];
+  selectedPageIdsAfter: string[];
 };
 
 type HistoryState = {
@@ -163,13 +169,27 @@ type HistoryState = {
 };
 
 type PageView = {
+  id: string;
   pageNumber: number;
+  sourceDocumentId?: string;
   sourcePageNumber?: number;
   width: number;
   height: number;
+  rotation: number;
+  label?: string;
+  isBlank?: boolean;
+  background?: string;
   imageUrl: string;
   textItems: TextItemView[];
 };
+
+type SourceDocument = {
+  id: string;
+  name: string;
+  bytes: Uint8Array;
+};
+
+type BlankPagePreset = "a4Portrait" | "a4Landscape" | "a3Portrait" | "a3Landscape" | "letterPortrait" | "letterLandscape" | "legalPortrait" | "legalLandscape" | "matchCurrent" | "custom";
 
 const PAGE_SCALE = 1.35;
 const MAX_HISTORY_ENTRIES = 100;
@@ -179,7 +199,10 @@ const COMMENT_MARKER_SIZE = 32;
 
 const demoPages: PageView[] = [
   {
+    id: "demo-page-1",
     pageNumber: 1,
+    rotation: 0,
+    isBlank: true,
     width: 612,
     height: 792,
     imageUrl: "",
@@ -220,6 +243,8 @@ export function App() {
   const [pdfName, setPdfName] = useState("Untitled document");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
+  const [activeSourceDocumentId, setActiveSourceDocumentId] = useState<string | null>(null);
+  const [sourceDocuments, setSourceDocuments] = useState<Record<string, SourceDocument>>({});
   const [pages, setPages] = useState<PageView[]>(demoPages);
   const [currentPage, setCurrentPage] = useState(1);
   const [marks, setMarks] = useState<Mark[]>(initialMarks);
@@ -242,10 +267,22 @@ export function App() {
   const [leftPanel, setLeftPanel] = useState<LeftPanel>("pages");
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
+  const [selectedPageIds, setSelectedPageIds] = useState<string[]>([demoPages[0].id]);
+  const [lastSelectedPageId, setLastSelectedPageId] = useState<string | null>(demoPages[0].id);
+  const [copiedPages, setCopiedPages] = useState<{ pages: PageView[]; marks: Mark[] } | null>(null);
+  const [draggedPageIds, setDraggedPageIds] = useState<string[]>([]);
+  const [pageDropTargetId, setPageDropTargetId] = useState<string | null>(null);
+  const [pageDropPosition, setPageDropPosition] = useState<"before" | "after">("after");
+  const [blankPagePreset, setBlankPagePreset] = useState<BlankPagePreset>("matchCurrent");
+  const [blankPageQuantity, setBlankPageQuantity] = useState(1);
+  const [blankPageLabel, setBlankPageLabel] = useState("");
+  const [customPageWidth, setCustomPageWidth] = useState(612);
+  const [customPageHeight, setCustomPageHeight] = useState(792);
   const [isDragging, setIsDragging] = useState(false);
   const [workState, setWorkState] = useState<WorkState | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const importPdfInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const signatureInput = useRef<HTMLInputElement>(null);
   const commentEditorRef = useRef<HTMLTextAreaElement>(null);
@@ -402,7 +439,7 @@ export function App() {
             progress: ((index - 1) / activePdf.numPages) * 100,
           });
           const page = await activePdf.getPage(index);
-          const rendered = await renderPage(page);
+          const rendered = await renderPage(page, activeSourceDocumentId ?? undefined);
           if (cancelled) return;
           nextPages.push(rendered);
           setWorkState({
@@ -412,6 +449,8 @@ export function App() {
         }
         setPages(nextPages);
         setCurrentPage(1);
+        setSelectedPageIds(nextPages[0] ? [nextPages[0].id] : []);
+        setLastSelectedPageId(nextPages[0]?.id ?? null);
         setWorkState(null);
       } catch (error) {
         if (cancelled) return;
@@ -425,9 +464,9 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [pdfDoc]);
+  }, [pdfDoc, activeSourceDocumentId]);
 
-  async function renderPage(page: PDFPageProxy): Promise<PageView> {
+  async function renderPage(page: PDFPageProxy, sourceDocumentId?: string): Promise<PageView> {
     const viewport = page.getViewport({ scale: PAGE_SCALE });
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
@@ -442,8 +481,11 @@ export function App() {
     const textContent = await page.getTextContent();
 
     return {
+      id: crypto.randomUUID(),
       pageNumber: page.pageNumber,
+      sourceDocumentId,
       sourcePageNumber: page.pageNumber,
+      rotation: 0,
       width: viewport.width,
       height: viewport.height,
       imageUrl: canvas.toDataURL("image/png"),
@@ -464,14 +506,19 @@ export function App() {
       const bytes = new Uint8Array(buffer);
       setWorkState({ message: "Checking PDF", progress: 20 });
       const loaded = await getDocument({ data: bytes.slice() }).promise;
+      const sourceId = crypto.randomUUID();
 
       setWorkState({ message: "Preparing pages", progress: 35 });
       setPdfName(file.name);
       setPdfBytes(bytes);
+      setSourceDocuments({ [sourceId]: { id: sourceId, name: file.name, bytes } });
+      setActiveSourceDocumentId(sourceId);
       setPdfDoc(loaded);
       setMarks([]);
       setHistory({ past: [], future: [] });
       setSelectedMark(null);
+      setSelectedPageIds([]);
+      setLastSelectedPageId(null);
     } catch (error) {
       setWorkState(null);
       setErrorMessage(getPdfErrorMessage(error, "upload"));
@@ -546,22 +593,6 @@ export function App() {
       setActiveTool("select");
       setErrorMessage(getSignatureErrorMessage(error));
     }
-  }
-
-  function addPage() {
-    const pageNumber = pages.length + 1;
-    setPages((existing) => [
-      ...existing,
-      {
-        pageNumber,
-        sourcePageNumber: undefined,
-        width: 612,
-        height: 792,
-        imageUrl: "",
-        textItems: [],
-      },
-    ]);
-    setCurrentPage(pageNumber);
   }
 
   function addMark(pageNumber: number, x: number, y: number) {
@@ -934,31 +965,314 @@ export function App() {
     setSelectedMark(mark.id);
   }
 
-  function duplicatePage() {
-    const sourcePage = pages.find((page) => page.pageNumber === currentPage);
-    if (!sourcePage) return;
+  function handlePageSelect(page: PageView, event: ReactMouseEvent<HTMLButtonElement>) {
+    setCurrentPage(page.pageNumber);
+    setSelectedMark(null);
+    if (event.shiftKey && lastSelectedPageId) {
+      const start = pages.findIndex((item) => item.id === lastSelectedPageId);
+      const end = pages.findIndex((item) => item.id === page.id);
+      if (start >= 0 && end >= 0) {
+        const [from, to] = start < end ? [start, end] : [end, start];
+        setSelectedPageIds(pages.slice(from, to + 1).map((item) => item.id));
+        return;
+      }
+    }
+    if (event.metaKey || event.ctrlKey) {
+      setSelectedPageIds((existing) => {
+        const next = existing.includes(page.id) ? existing.filter((id) => id !== page.id) : [...existing, page.id];
+        return next.length > 0 ? next : [page.id];
+      });
+      setLastSelectedPageId(page.id);
+      return;
+    }
+    setSelectedPageIds([page.id]);
+    setLastSelectedPageId(page.id);
+  }
 
-    const nextNumber = pages.length + 1;
-    setPages((existing) => [...existing, { ...sourcePage, pageNumber: nextNumber }]);
-    const nextMarks = [
-      ...marks,
-      ...marks
-        .filter((mark) => mark.page === currentPage)
-        .map((mark) => ({ ...mark, id: crypto.randomUUID(), page: nextNumber })),
-    ];
-    commitMarks(nextMarks, selectedMark);
-    setCurrentPage(nextNumber);
+  function selectAllPages() {
+    setSelectedPageIds(pages.map((page) => page.id));
+    setLastSelectedPageId(pages[0]?.id ?? null);
+  }
+
+  function clearPageSelection() {
+    const current = pages.find((page) => page.pageNumber === currentPage) ?? pages[0];
+    setSelectedPageIds(current ? [current.id] : []);
+    setLastSelectedPageId(current?.id ?? null);
+  }
+
+  function getActivePageIds() {
+    if (selectedPageIds.length > 0) return selectedPageIds.filter((id) => pages.some((page) => page.id === id));
+    const current = pages.find((page) => page.pageNumber === currentPage) ?? pages[0];
+    return current ? [current.id] : [];
+  }
+
+  function addPage() {
+    insertBlankPages("end");
+  }
+
+  function duplicatePage() {
+    duplicateSelectedPages();
+  }
+
+  function duplicateSelectedPages() {
+    const activeIds = getActivePageIds();
+    if (activeIds.length === 0) return;
+    const sourcePages = pages.filter((page) => activeIds.includes(page.id));
+    const insertIndex = Math.max(...sourcePages.map((page) => pages.findIndex((item) => item.id === page.id))) + 1;
+    const pageCopies = sourcePages.map((page) => ({ ...page, id: crypto.randomUUID(), label: page.label ? `${page.label} copy` : page.label }));
+    const pageNumberMap = new Map(sourcePages.map((page, index) => [page.pageNumber, insertIndex + index + 1]));
+    const markCopies = marks
+      .filter((mark) => pageNumberMap.has(mark.page))
+      .map((mark) => ({
+        ...duplicateMark(mark, pageNumberMap.get(mark.page) ?? mark.page),
+        comment: mark.comment ? cloneComment(mark.comment) : mark.comment,
+      }));
+    const nextPages = renumberPages([...pages.slice(0, insertIndex), ...pageCopies, ...pages.slice(insertIndex)]);
+    const nextMarks = [...remapMarksForPages(marks, pages, nextPages), ...markCopies];
+    const nextSelectedIds = pageCopies.map((page) => page.id);
+    commitDocument(nextPages, nextMarks, nextSelectedIds.length ? markCopies[0]?.id ?? null : selectedMark, insertIndex + 1, nextSelectedIds);
+  }
+
+  function deleteSelectedPages() {
+    const activeIds = getActivePageIds();
+    if (activeIds.length === 0) return;
+    if (activeIds.length > 1 && !window.confirm(`Delete ${activeIds.length} selected pages?`)) return;
+    const deletedNumbers = new Set(pages.filter((page) => activeIds.includes(page.id)).map((page) => page.pageNumber));
+    let remainingPages = pages.filter((page) => !activeIds.includes(page.id));
+    if (remainingPages.length === 0) remainingPages = [createBlankPageView(1, getBlankPageSize("letterPortrait"), "Blank")];
+    const nextPages = renumberPages(remainingPages);
+    const nextMarks = remapMarksForPages(
+      marks.filter((mark) => !deletedNumbers.has(mark.page)),
+      pages,
+      nextPages
+    );
+    const nextPage = Math.min(currentPage, nextPages.length);
+    const selectedPage = nextPages[nextPage - 1] ?? nextPages[0];
+    commitDocument(nextPages, nextMarks, null, selectedPage.pageNumber, [selectedPage.id]);
+  }
+
+  async function rotateSelectedPages(delta: 90 | -90) {
+    const activeIds = getActivePageIds();
+    if (activeIds.length === 0) return;
+    setWorkState({ message: "Rotating pages", progress: 20 });
+    const rotatedPages = await Promise.all(pages.map((page) => (activeIds.includes(page.id) ? rotatePageView(page, delta) : page)));
+    const rotatedNumbers = new Set(pages.filter((page) => activeIds.includes(page.id)).map((page) => page.pageNumber));
+    const nextMarks = marks.map((mark) => (rotatedNumbers.has(mark.page) ? rotateMarkForPage(mark, pages.find((page) => page.pageNumber === mark.page)!, delta) : mark));
+    setWorkState(null);
+    commitDocument(rotatedPages, nextMarks, selectedMark, currentPage, activeIds);
+  }
+
+  function insertBlankPages(position: "before" | "after" | "start" | "end") {
+    const targetIndex = getPageInsertionIndex(position);
+    const current = pages.find((page) => page.pageNumber === currentPage) ?? pages[0];
+    const size =
+      blankPagePreset === "matchCurrent" && current
+        ? { width: current.width / PAGE_SCALE, height: current.height / PAGE_SCALE }
+        : blankPagePreset === "custom"
+        ? { width: customPageWidth, height: customPageHeight }
+        : getBlankPageSize(blankPagePreset);
+    const quantity = clamp(Math.round(blankPageQuantity), 1, 50);
+    const blanks = Array.from({ length: quantity }, (_, index) => createBlankPageView(0, size, blankPageLabel ? `${blankPageLabel}${quantity > 1 ? ` ${index + 1}` : ""}` : undefined));
+    const nextPages = renumberPages([...pages.slice(0, targetIndex), ...blanks, ...pages.slice(targetIndex)]);
+    const selectedIds = blanks.map((page) => page.id);
+    commitDocument(nextPages, remapMarksForPages(marks, pages, nextPages), null, targetIndex + 1, selectedIds);
+  }
+
+  function getPageInsertionIndex(position: "before" | "after" | "start" | "end") {
+    if (position === "start") return 0;
+    if (position === "end") return pages.length;
+    const activeIds = getActivePageIds();
+    const indexes = pages.map((page, index) => (activeIds.includes(page.id) ? index : -1)).filter((index) => index >= 0);
+    if (indexes.length === 0) return position === "before" ? currentPage - 1 : currentPage;
+    return position === "before" ? Math.min(...indexes) : Math.max(...indexes) + 1;
+  }
+
+  async function handleImportPdf(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0) return;
+    await importPdfFiles(files, "after");
+  }
+
+  async function importPdfFiles(files: File[], position: "before" | "after" | "end" = "after") {
+    try {
+      setErrorMessage("");
+      const importedPages: PageView[] = [];
+      const importedSources: Record<string, SourceDocument> = {};
+      for (const [fileIndex, file] of files.entries()) {
+        if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+          setErrorMessage(`${file.name} is not a supported PDF file.`);
+          continue;
+        }
+        setWorkState({ message: `Importing ${file.name}`, progress: (fileIndex / Math.max(1, files.length)) * 80 });
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const sourceId = crypto.randomUUID();
+        importedSources[sourceId] = { id: sourceId, name: file.name, bytes };
+        const importedDoc = await getDocument({ data: bytes.slice() }).promise;
+        for (let pageIndex = 1; pageIndex <= importedDoc.numPages; pageIndex += 1) {
+          importedPages.push(await renderPage(await importedDoc.getPage(pageIndex), sourceId));
+        }
+      }
+      if (importedPages.length === 0) {
+        setWorkState(null);
+        return;
+      }
+      setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
+      const insertIndex = getPageInsertionIndex(position);
+      const nextPages = renumberPages([...pages.slice(0, insertIndex), ...importedPages, ...pages.slice(insertIndex)]);
+      const selectedIds = importedPages.map((page) => page.id);
+      commitDocument(nextPages, remapMarksForPages(marks, pages, nextPages), null, insertIndex + 1, selectedIds);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(getPdfErrorMessage(error, "upload"));
+    }
+  }
+
+  function hasPdfFiles(files: FileList) {
+    return Array.from(files).some((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+  }
+
+  function handlePagesPanelDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    if (!hasPdfFiles(event.dataTransfer.files)) return;
+    event.preventDefault();
+  }
+
+  async function handlePagesPanelDrop(event: ReactDragEvent<HTMLDivElement>) {
+    const files = Array.from(event.dataTransfer.files).filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+    if (files.length === 0) return;
+    event.preventDefault();
+    await importPdfFiles(files, "after");
+  }
+
+  function copySelectedPages() {
+    const activeIds = getActivePageIds();
+    const copied = pages.filter((page) => activeIds.includes(page.id));
+    const copiedNumbers = new Set(copied.map((page) => page.pageNumber));
+    setCopiedPages({ pages: copied, marks: marks.filter((mark) => copiedNumbers.has(mark.page)) });
+  }
+
+  function pasteCopiedPages(position: "before" | "after" | "end" = "after") {
+    if (!copiedPages || copiedPages.pages.length === 0) return;
+    const insertIndex = position === "end" ? pages.length : getPageInsertionIndex(position);
+    const oldToNewPageNumber = new Map<number, number>();
+    const pageCopies = copiedPages.pages.map((page, index) => {
+      oldToNewPageNumber.set(page.pageNumber, insertIndex + index + 1);
+      return { ...page, id: crypto.randomUUID(), label: page.label ? `${page.label} copy` : page.label };
+    });
+    const markCopies = copiedPages.marks.map((mark) => ({
+      ...duplicateMark(mark, oldToNewPageNumber.get(mark.page) ?? mark.page),
+      comment: mark.comment ? cloneComment(mark.comment) : mark.comment,
+    }));
+    const nextPages = renumberPages([...pages.slice(0, insertIndex), ...pageCopies, ...pages.slice(insertIndex)]);
+    const nextMarks = [...remapMarksForPages(marks, pages, nextPages), ...markCopies];
+    commitDocument(nextPages, nextMarks, null, insertIndex + 1, pageCopies.map((page) => page.id));
+  }
+
+  async function extractSelectedPages(removeAfterExtract: boolean) {
+    const activeIds = getActivePageIds();
+    const selectedPages = pages.filter((page) => activeIds.includes(page.id));
+    if (selectedPages.length === 0) return;
+    const exportedPdf = await buildPdfFromPages(selectedPages, marks.filter((mark) => selectedPages.some((page) => page.pageNumber === mark.page)));
+    downloadPdfBytes(await exportedPdf.save(), `${pdfName.replace(/\.pdf$/i, "")}-extract.pdf`);
+    if (removeAfterExtract) deleteSelectedPages();
+  }
+
+  async function splitAfterCurrentPage() {
+    const first = pages.slice(0, currentPage);
+    const second = pages.slice(currentPage);
+    if (first.length === 0 || second.length === 0) {
+      setErrorMessage("Choose a page that leaves pages on both sides of the split.");
+      return;
+    }
+    downloadPdfBytes(await (await buildPdfFromPages(first, marks.filter((mark) => mark.page <= currentPage))).save(), `${pdfName.replace(/\.pdf$/i, "")}-part-1.pdf`);
+    downloadPdfBytes(await (await buildPdfFromPages(second, marks.filter((mark) => mark.page > currentPage))).save(), `${pdfName.replace(/\.pdf$/i, "")}-part-2.pdf`);
+  }
+
+  function updateSelectedPageLabel(label: string) {
+    const activeIds = getActivePageIds();
+    const nextPages = pages.map((page) => (activeIds.includes(page.id) ? { ...page, label: label.trim() || undefined } : page));
+    commitDocument(nextPages, marks, selectedMark, currentPage, activeIds);
+  }
+
+  function startPageDrag(page: PageView) {
+    const activeIds = selectedPageIds.includes(page.id) ? selectedPageIds : [page.id];
+    setDraggedPageIds(activeIds);
+  }
+
+  function updatePageDropTarget(page: PageView, event: ReactDragEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setPageDropTargetId(page.id);
+    setPageDropPosition(event.clientY < bounds.top + bounds.height / 2 ? "before" : "after");
+  }
+
+  function finishPageDrop(targetPage: PageView) {
+    if (draggedPageIds.length === 0 || draggedPageIds.includes(targetPage.id)) {
+      setDraggedPageIds([]);
+      setPageDropTargetId(null);
+      return;
+    }
+    const moving = pages.filter((page) => draggedPageIds.includes(page.id));
+    const remaining = pages.filter((page) => !draggedPageIds.includes(page.id));
+    const targetIndexInRemaining = remaining.findIndex((page) => page.id === targetPage.id);
+    const insertIndex = pageDropPosition === "before" ? targetIndexInRemaining : targetIndexInRemaining + 1;
+    const nextPages = renumberPages([...remaining.slice(0, insertIndex), ...moving, ...remaining.slice(insertIndex)]);
+    const nextMarks = remapMarksForPages(marks, pages, nextPages);
+    const firstMoved = moving[0];
+    const nextCurrentPage = firstMoved ? nextPages.find((page) => page.id === firstMoved.id)?.pageNumber ?? currentPage : currentPage;
+    commitDocument(nextPages, nextMarks, selectedMark, nextCurrentPage, moving.map((page) => page.id));
+    setDraggedPageIds([]);
+    setPageDropTargetId(null);
   }
 
   function commitMarks(nextMarks: Mark[], nextSelectedMark: string | null, historyBefore = marks) {
-    if (areMarksEqual(historyBefore, nextMarks) && selectedMark === nextSelectedMark) return;
+    commitDocument(pages, nextMarks, nextSelectedMark, currentPage, selectedPageIds, pages, historyBefore);
+  }
+
+  function commitDocument(
+    nextPages: PageView[],
+    nextMarks: Mark[],
+    nextSelectedMark: string | null,
+    nextCurrentPage: number,
+    nextSelectedPageIds: string[],
+    pagesBefore = pages,
+    marksBefore = marks
+  ) {
+    if (
+      arePagesEqual(pagesBefore, nextPages) &&
+      areMarksEqual(marksBefore, nextMarks) &&
+      selectedMark === nextSelectedMark &&
+      currentPage === nextCurrentPage &&
+      arraysEqual(selectedPageIds, nextSelectedPageIds)
+    ) {
+      return;
+    }
 
     setHistory((existing) => ({
-      past: [...existing.past.slice(-(MAX_HISTORY_ENTRIES - 1)), { before: historyBefore, after: nextMarks, selectedBefore: selectedMark, selectedAfter: nextSelectedMark }],
+      past: [
+        ...existing.past.slice(-(MAX_HISTORY_ENTRIES - 1)),
+        {
+          pagesBefore,
+          pagesAfter: nextPages,
+          marksBefore,
+          marksAfter: nextMarks,
+          selectedBefore: selectedMark,
+          selectedAfter: nextSelectedMark,
+          currentPageBefore: currentPage,
+          currentPageAfter: nextCurrentPage,
+          selectedPageIdsBefore: selectedPageIds,
+          selectedPageIdsAfter: nextSelectedPageIds,
+        },
+      ],
       future: [],
     }));
+    setPages(nextPages);
     setMarks(nextMarks);
     setSelectedMark(nextSelectedMark);
+    setCurrentPage(nextCurrentPage);
+    setSelectedPageIds(nextSelectedPageIds);
+    setLastSelectedPageId(nextSelectedPageIds[0] ?? null);
   }
 
   function undo() {
@@ -966,8 +1280,12 @@ export function App() {
       const entry = existing.past[existing.past.length - 1];
       if (!entry) return existing;
 
-      setMarks(entry.before);
+      setPages(entry.pagesBefore);
+      setMarks(entry.marksBefore);
       setSelectedMark(entry.selectedBefore);
+      setCurrentPage(entry.currentPageBefore);
+      setSelectedPageIds(entry.selectedPageIdsBefore);
+      setLastSelectedPageId(entry.selectedPageIdsBefore[0] ?? null);
 
       return {
         past: existing.past.slice(0, -1),
@@ -981,8 +1299,12 @@ export function App() {
       const entry = existing.future[0];
       if (!entry) return existing;
 
-      setMarks(entry.after);
+      setPages(entry.pagesAfter);
+      setMarks(entry.marksAfter);
       setSelectedMark(entry.selectedAfter);
+      setCurrentPage(entry.currentPageAfter);
+      setSelectedPageIds(entry.selectedPageIdsAfter);
+      setLastSelectedPageId(entry.selectedPageIdsAfter[0] ?? null);
 
       return {
         past: [...existing.past, entry].slice(-MAX_HISTORY_ENTRIES),
@@ -991,231 +1313,278 @@ export function App() {
     });
   }
 
+  async function buildPdfFromPages(exportPages: PageView[], exportMarks: Mark[], onProgress?: (message: string, progress: number) => void) {
+    const exportedPdf = await PDFDocument.create();
+    const loadedSourcePdfs = new Map<string, PDFDocument>();
+    async function getSourcePdf(sourceDocumentId: string) {
+      const existing = loadedSourcePdfs.get(sourceDocumentId);
+      if (existing) return existing;
+      const source = sourceDocuments[sourceDocumentId];
+      if (!source) return null;
+      const loaded = await PDFDocument.load(source.bytes);
+      loadedSourcePdfs.set(sourceDocumentId, loaded);
+      return loaded;
+    }
+
+    const helvetica = await exportedPdf.embedFont(StandardFonts.Helvetica);
+    const helveticaBold = await exportedPdf.embedFont(StandardFonts.HelveticaBold);
+    const textFonts = new Map<string, PDFFont>();
+    async function getTextBoxFont(style: TextBoxStyle) {
+      const fontName = getStandardFontName(style);
+      const existing = textFonts.get(fontName);
+      if (existing) return existing;
+      const embedded = await exportedPdf.embedFont(fontName);
+      textFonts.set(fontName, embedded);
+      return embedded;
+    }
+
+    for (const [pageIndex, pageView] of exportPages.entries()) {
+      onProgress?.("Copying pages", 10 + (pageIndex / Math.max(1, exportPages.length)) * 20);
+      if (pageView.sourceDocumentId && pageView.sourcePageNumber) {
+        const sourcePdf = await getSourcePdf(pageView.sourceDocumentId);
+        if (!sourcePdf) {
+          exportedPdf.addPage([pageView.width / PAGE_SCALE, pageView.height / PAGE_SCALE]);
+          continue;
+        }
+        const [copiedPage] = await exportedPdf.copyPages(sourcePdf, [pageView.sourcePageNumber - 1]);
+        if (pageView.rotation) copiedPage.setRotation(degrees(pageView.rotation));
+        exportedPdf.addPage(copiedPage);
+      } else {
+        const page = exportedPdf.addPage([pageView.width / PAGE_SCALE, pageView.height / PAGE_SCALE]);
+        if (pageView.background) {
+          page.drawRectangle({
+            x: 0,
+            y: 0,
+            width: page.getWidth(),
+            height: page.getHeight(),
+            color: colorToRgb(pageView.background),
+          });
+        }
+        if (pageView.rotation) page.setRotation(degrees(pageView.rotation));
+      }
+    }
+
+    const pageNumberToExportIndex = new Map(exportPages.map((page, index) => [page.pageNumber, index]));
+    for (const [index, mark] of exportMarks.entries()) {
+      onProgress?.("Applying annotations", 30 + (index / Math.max(1, exportMarks.length)) * 55);
+      const exportIndex = pageNumberToExportIndex.get(mark.page);
+      if (exportIndex === undefined) continue;
+      const page = exportedPdf.getPage(exportIndex);
+      const sourcePage = exportPages.find((item) => item.pageNumber === mark.page);
+      if (!sourcePage) continue;
+
+      const { width, height } = page.getSize();
+      const x = (mark.x / sourcePage.width) * width;
+      const y = height - ((mark.y + mark.height) / sourcePage.height) * height;
+      const markWidth = (mark.width / sourcePage.width) * width;
+      const markHeight = (mark.height / sourcePage.height) * height;
+      const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
+
+      if (mark.kind === "text") {
+        const textStyle = getTextBoxStyle(mark);
+        const textFont = await getTextBoxFont(textStyle);
+        drawTextBoxToPdfPage({
+          page,
+          mark,
+          font: textFont,
+          x,
+          y,
+          width: markWidth,
+          height: markHeight,
+          fontSize: markSize,
+          scale: height / sourcePage.height,
+        });
+        continue;
+      }
+
+      if (mark.kind === "shape" && mark.shapeStyle) {
+        drawShapeToPdfPage({
+          page,
+          mark,
+          font: helvetica,
+          x,
+          y,
+          width: markWidth,
+          height: markHeight,
+          scale: height / sourcePage.height,
+        });
+        continue;
+      }
+
+      if (mark.kind === "comment" && mark.comment) {
+        const markerSize = Math.max(14, (24 / sourcePage.height) * height);
+        page.drawRectangle({
+          x,
+          y: y + markHeight - markerSize,
+          width: markerSize,
+          height: markerSize,
+          color: colorToRgb(mark.comment.color),
+          opacity: mark.comment.resolved ? 0.35 : 0.92,
+          borderColor: colorToRgb("#7c2d12"),
+          borderWidth: 0.75,
+        });
+        page.drawText("C", {
+          x: x + markerSize * 0.28,
+          y: y + markHeight - markerSize * 0.75,
+          size: markerSize * 0.58,
+          font: helveticaBold,
+          color: colorToRgb("#111827"),
+          opacity: mark.comment.resolved ? 0.65 : 1,
+        });
+        continue;
+      }
+
+      if ((mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl) {
+        const imageBytes = dataUrlToBytes(mark.imageDataUrl);
+        const embeddedImage =
+          mark.imageMimeType === "image/jpeg" ? await exportedPdf.embedJpg(imageBytes) : await exportedPdf.embedPng(imageBytes);
+        const rotation = degreesToRadians(mark.rotation);
+        const centerX = x + markWidth / 2;
+        const centerY = y + markHeight / 2;
+        const rotatedX = centerX - (markWidth / 2) * Math.cos(rotation) + (markHeight / 2) * Math.sin(rotation);
+        const rotatedY = centerY - (markWidth / 2) * Math.sin(rotation) - (markHeight / 2) * Math.cos(rotation);
+
+        page.drawImage(embeddedImage, {
+          x: rotatedX,
+          y: rotatedY,
+          width: markWidth,
+          height: markHeight,
+          rotate: degrees(mark.rotation),
+          opacity: mark.opacity ?? 1,
+        });
+        continue;
+      }
+
+      if (mark.kind === "stroke" && mark.strokePoints && mark.strokePoints.length > 0) {
+        const exportedPoints = smoothStrokePoints(mark.strokePoints).map((point) => ({
+          x: (point.x / sourcePage.width) * width,
+          y: height - (point.y / sourcePage.height) * height,
+        }));
+        const strokeWidth = Math.max(0.5, (mark.size / sourcePage.height) * height);
+
+        if (exportedPoints.length === 1) {
+          const point = exportedPoints[0];
+          page.drawCircle({
+            x: point.x,
+            y: point.y,
+            size: strokeWidth / 2,
+            color: colorToRgb(mark.color),
+            opacity: mark.strokeOpacity ?? 1,
+          });
+        }
+
+        for (let pointIndex = 1; pointIndex < exportedPoints.length; pointIndex += 1) {
+          page.drawLine({
+            start: exportedPoints[pointIndex - 1],
+            end: exportedPoints[pointIndex],
+            thickness: strokeWidth,
+            color: colorToRgb(mark.color),
+            opacity: mark.strokeOpacity ?? 1,
+          });
+        }
+        continue;
+      }
+
+      if (isTextMarkupKind(mark.kind) && mark.markupRects && mark.markupRects.length > 0) {
+        for (const rect of mark.markupRects) {
+          const exportedRect = scaleMarkupRect(rect, sourcePage, { width, height });
+          if (mark.kind === "textHighlight") {
+            page.drawRectangle({
+              x: exportedRect.x,
+              y: exportedRect.y,
+              width: exportedRect.width,
+              height: exportedRect.height,
+              color: colorToRgb(mark.color),
+              opacity: mark.opacity ?? 0.38,
+            });
+            continue;
+          }
+
+          const lineY =
+            mark.kind === "underline"
+              ? exportedRect.y + Math.max(1, exportedRect.height * 0.12)
+              : exportedRect.y + Math.max(1, exportedRect.height * 0.52);
+          page.drawLine({
+            start: { x: exportedRect.x, y: lineY },
+            end: { x: exportedRect.x + exportedRect.width, y: lineY },
+            thickness: Math.max(0.5, ((mark.thickness ?? 2) / sourcePage.height) * height),
+            color: colorToRgb(mark.color),
+            opacity: mark.opacity ?? 1,
+          });
+        }
+        continue;
+      }
+
+      if (mark.kind === "highlight") {
+        page.drawRectangle({
+          x,
+          y,
+          width: markWidth,
+          height: markHeight,
+          color: colorToRgb(mark.color),
+          opacity: 0.45,
+        });
+        continue;
+      }
+
+      if (mark.kind === "stamp") {
+        page.drawRectangle({
+          x,
+          y,
+          width: markWidth,
+          height: markHeight,
+          borderColor: colorToRgb(mark.color),
+          borderWidth: 2,
+        });
+      }
+
+      page.drawText(mark.text || " ", {
+        x: x + (mark.kind === "stamp" ? 10 : 0),
+        y: y + Math.max(4, markHeight / 3),
+        size: markSize,
+        font: mark.kind === "stamp" ? helveticaBold : helvetica,
+        color: colorToRgb(mark.color),
+      });
+    }
+
+    appendCommentsSummary(exportedPdf, helvetica, helveticaBold, exportMarks.filter((mark) => mark.kind === "comment" && mark.comment));
+    return exportedPdf;
+  }
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const validationWindow = window as Window & {
+      __publishProExportForValidation?: () => Promise<{ bytes: number[]; pageCount: number; dimensions: { width: number; height: number }[] }>;
+    };
+    validationWindow.__publishProExportForValidation = async () => {
+      const exportedPdf = await buildPdfFromPages(pages, marks);
+      const bytes = await exportedPdf.save();
+      return {
+        bytes: Array.from(bytes),
+        pageCount: exportedPdf.getPageCount(),
+        dimensions: exportedPdf.getPages().map((page) => page.getSize()),
+      };
+    };
+
+    return () => {
+      delete validationWindow.__publishProExportForValidation;
+    };
+  }, [marks, pages, sourceDocuments]);
+
   async function exportPdf() {
     try {
       setErrorMessage("");
       setWorkState({ message: "Preparing export", progress: 10 });
-      const exportedPdf = pdfBytes ? await PDFDocument.load(pdfBytes) : await PDFDocument.create();
-      const sourcePdf = pdfBytes ? await PDFDocument.load(pdfBytes) : null;
-      const helvetica = await exportedPdf.embedFont(StandardFonts.Helvetica);
-      const helveticaBold = await exportedPdf.embedFont(StandardFonts.HelveticaBold);
-      const textFonts = new Map<string, PDFFont>();
-      async function getTextBoxFont(style: TextBoxStyle) {
-        const fontName = getStandardFontName(style);
-        const existing = textFonts.get(fontName);
-        if (existing) return existing;
-        const embedded = await exportedPdf.embedFont(fontName);
-        textFonts.set(fontName, embedded);
-        return embedded;
-      }
-
-      while (exportedPdf.getPageCount() < pages.length) {
-        const pageView = pages[exportedPdf.getPageCount()];
-        if (sourcePdf && pageView.sourcePageNumber) {
-          const [copiedPage] = await exportedPdf.copyPages(sourcePdf, [pageView.sourcePageNumber - 1]);
-          exportedPdf.addPage(copiedPage);
-        } else {
-          exportedPdf.addPage([612, 792]);
-        }
-      }
-
-      for (const [index, mark] of marks.entries()) {
-        setWorkState({ message: "Applying annotations", progress: 20 + (index / Math.max(1, marks.length)) * 60 });
-        const page = exportedPdf.getPage(mark.page - 1);
-        const sourcePage = pages.find((item) => item.pageNumber === mark.page);
-        if (!sourcePage) continue;
-
-        const { width, height } = page.getSize();
-        const x = (mark.x / sourcePage.width) * width;
-        const y = height - ((mark.y + mark.height) / sourcePage.height) * height;
-        const markWidth = (mark.width / sourcePage.width) * width;
-        const markHeight = (mark.height / sourcePage.height) * height;
-        const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
-
-        if (mark.kind === "text") {
-          const textStyle = getTextBoxStyle(mark);
-          const textFont = await getTextBoxFont(textStyle);
-          drawTextBoxToPdfPage({
-            page,
-            mark,
-            font: textFont,
-            x,
-            y,
-            width: markWidth,
-            height: markHeight,
-            fontSize: markSize,
-            scale: height / sourcePage.height,
-          });
-          continue;
-        }
-
-        if (mark.kind === "shape" && mark.shapeStyle) {
-          drawShapeToPdfPage({
-            page,
-            mark,
-            font: helvetica,
-            x,
-            y,
-            width: markWidth,
-            height: markHeight,
-            scale: height / sourcePage.height,
-          });
-          continue;
-        }
-
-        if (mark.kind === "comment" && mark.comment) {
-          const markerSize = Math.max(14, (24 / sourcePage.height) * height);
-          page.drawRectangle({
-            x,
-            y: y + markHeight - markerSize,
-            width: markerSize,
-            height: markerSize,
-            color: colorToRgb(mark.comment.color),
-            opacity: mark.comment.resolved ? 0.35 : 0.92,
-            borderColor: colorToRgb("#7c2d12"),
-            borderWidth: 0.75,
-          });
-          page.drawText("C", {
-            x: x + markerSize * 0.28,
-            y: y + markHeight - markerSize * 0.75,
-            size: markerSize * 0.58,
-            font: helveticaBold,
-            color: colorToRgb("#111827"),
-            opacity: mark.comment.resolved ? 0.65 : 1,
-          });
-          continue;
-        }
-
-        if ((mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl) {
-          const imageBytes = dataUrlToBytes(mark.imageDataUrl);
-          const embeddedImage =
-            mark.imageMimeType === "image/jpeg" ? await exportedPdf.embedJpg(imageBytes) : await exportedPdf.embedPng(imageBytes);
-          const rotation = degreesToRadians(mark.rotation);
-          const centerX = x + markWidth / 2;
-          const centerY = y + markHeight / 2;
-          const rotatedX = centerX - (markWidth / 2) * Math.cos(rotation) + (markHeight / 2) * Math.sin(rotation);
-          const rotatedY = centerY - (markWidth / 2) * Math.sin(rotation) - (markHeight / 2) * Math.cos(rotation);
-
-          page.drawImage(embeddedImage, {
-            x: rotatedX,
-            y: rotatedY,
-            width: markWidth,
-            height: markHeight,
-            rotate: degrees(mark.rotation),
-            opacity: mark.opacity ?? 1,
-          });
-          continue;
-        }
-
-        if (mark.kind === "stroke" && mark.strokePoints && mark.strokePoints.length > 0) {
-          const exportedPoints = smoothStrokePoints(mark.strokePoints).map((point) => ({
-            x: (point.x / sourcePage.width) * width,
-            y: height - (point.y / sourcePage.height) * height,
-          }));
-          const strokeWidth = Math.max(0.5, (mark.size / sourcePage.height) * height);
-
-          if (exportedPoints.length === 1) {
-            const point = exportedPoints[0];
-            page.drawCircle({
-              x: point.x,
-              y: point.y,
-              size: strokeWidth / 2,
-              color: colorToRgb(mark.color),
-              opacity: mark.strokeOpacity ?? 1,
-            });
-          }
-
-          for (let pointIndex = 1; pointIndex < exportedPoints.length; pointIndex += 1) {
-            page.drawLine({
-              start: exportedPoints[pointIndex - 1],
-              end: exportedPoints[pointIndex],
-              thickness: strokeWidth,
-              color: colorToRgb(mark.color),
-              opacity: mark.strokeOpacity ?? 1,
-            });
-          }
-          continue;
-        }
-
-        if (isTextMarkupKind(mark.kind) && mark.markupRects && mark.markupRects.length > 0) {
-          for (const rect of mark.markupRects) {
-            const exportedRect = scaleMarkupRect(rect, sourcePage, { width, height });
-            if (mark.kind === "textHighlight") {
-              page.drawRectangle({
-                x: exportedRect.x,
-                y: exportedRect.y,
-                width: exportedRect.width,
-                height: exportedRect.height,
-                color: colorToRgb(mark.color),
-                opacity: mark.opacity ?? 0.38,
-              });
-              continue;
-            }
-
-            const lineY =
-              mark.kind === "underline"
-                ? exportedRect.y + Math.max(1, exportedRect.height * 0.12)
-                : exportedRect.y + Math.max(1, exportedRect.height * 0.52);
-            page.drawLine({
-              start: { x: exportedRect.x, y: lineY },
-              end: { x: exportedRect.x + exportedRect.width, y: lineY },
-              thickness: Math.max(0.5, ((mark.thickness ?? 2) / sourcePage.height) * height),
-              color: colorToRgb(mark.color),
-              opacity: mark.opacity ?? 1,
-            });
-          }
-          continue;
-        }
-
-        if (mark.kind === "highlight") {
-          page.drawRectangle({
-            x,
-            y,
-            width: markWidth,
-            height: markHeight,
-            color: colorToRgb(mark.color),
-            opacity: 0.45,
-          });
-          continue;
-        }
-
-        if (mark.kind === "stamp") {
-          page.drawRectangle({
-            x,
-            y,
-            width: markWidth,
-            height: markHeight,
-            borderColor: colorToRgb(mark.color),
-            borderWidth: 2,
-          });
-        }
-
-        page.drawText(mark.text || " ", {
-          x: x + (mark.kind === "stamp" ? 10 : 0),
-          y: y + Math.max(4, markHeight / 3),
-          size: markSize,
-          font: mark.kind === "stamp" ? helveticaBold : helvetica,
-          color: colorToRgb(mark.color),
-        });
-      }
-
-      appendCommentsSummary(exportedPdf, helvetica, helveticaBold, comments);
-
+      const exportedPdf = await buildPdfFromPages(pages, marks, (message, progress) => setWorkState({ message, progress }));
       setWorkState({ message: "Saving PDF", progress: 90 });
-      const exported = await exportedPdf.save();
-      const blob = new Blob([exported.buffer as ArrayBuffer], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = pdfName.replace(/\.pdf$/i, "") + "-edited.pdf";
-      anchor.click();
-      URL.revokeObjectURL(url);
+      downloadPdfBytes(await exportedPdf.save(), pdfName.replace(/\.pdf$/i, "") + "-edited.pdf");
       setWorkState(null);
     } catch (error) {
       setWorkState(null);
       setErrorMessage(getPdfErrorMessage(error, "export"));
     }
   }
+
 
   return (
     <main className={`app-shell ${isLeftPanelCollapsed ? "left-collapsed" : ""} ${isRightPanelCollapsed ? "right-collapsed" : ""}`}>
@@ -1228,6 +1597,7 @@ export function App() {
         onExport={() => void exportPdf()}
       />
       <input className="hidden-file-input" ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
+      <input className="hidden-file-input" ref={importPdfInput} type="file" accept="application/pdf" multiple onChange={handleImportPdf} aria-label="Choose PDFs to import" />
       <input className="hidden-file-input" ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
       <input className="hidden-file-input" ref={signatureInput} type="file" accept="image/png" onChange={handleSignatureUpload} aria-label="Choose PNG signature file" />
 
@@ -1312,7 +1682,7 @@ export function App() {
         </nav>
 
         {!isLeftPanelCollapsed ? (
-          <aside className="left-panel">
+          <aside className="left-panel" onDragOver={leftPanel === "pages" ? handlePagesPanelDragOver : undefined} onDrop={leftPanel === "pages" ? handlePagesPanelDrop : undefined}>
             <div className="panel-header">
               <div>
                 <h2>{getLeftPanelTitle(leftPanel)}</h2>
@@ -1332,30 +1702,158 @@ export function App() {
                 <div className="page-list">
                   {filteredPages.map((page) => (
                     <button
-                      className={`thumb ${currentPage === page.pageNumber ? "active" : ""}`}
-                      key={page.pageNumber}
-                      onClick={() => setCurrentPage(page.pageNumber)}
-                      title={`Go to page ${page.pageNumber}`}
-                      aria-label={`Go to page ${page.pageNumber}`}
+                      className={`thumb ${currentPage === page.pageNumber ? "current" : ""} ${selectedPageIds.includes(page.id) ? "selected" : ""} ${
+                        pageDropTargetId === page.id ? `drop-${pageDropPosition}` : ""
+                      }`}
+                      key={page.id}
+                      draggable={!isBusy}
+                      onClick={(event) => handlePageSelect(page, event)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        handlePageSelect(page, event);
+                      }}
+                      onDragStart={() => startPageDrag(page)}
+                      onDragOver={(event) => updatePageDropTarget(page, event)}
+                      onDrop={() => finishPageDrop(page)}
+                      onDragEnd={() => {
+                        setDraggedPageIds([]);
+                        setPageDropTargetId(null);
+                      }}
+                      title={`Page ${page.pageNumber}${page.label ? `: ${page.label}` : ""}`}
+                      aria-label={`Page ${page.pageNumber}${page.label ? `, ${page.label}` : ""}`}
                       aria-current={currentPage === page.pageNumber ? "page" : undefined}
+                      aria-pressed={selectedPageIds.includes(page.id)}
                     >
                       <span className="thumb-grip" aria-hidden="true">::</span>
                       <div className="thumb-page">
                         {page.imageUrl ? <img src={page.imageUrl} alt="" /> : <FilePlus2 size={28} />}
                       </div>
                       <span>Page {page.pageNumber}</span>
+                      {page.label ? <em className="page-label">{page.label}</em> : null}
+                      {page.rotation ? <small className="page-rotation">{page.rotation}deg</small> : null}
                     </button>
                   ))}
                 </div>
-                <div className="page-actions">
-                  <button className="button ghost" onClick={addPage} disabled={isBusy} title="Add a blank page" aria-label="Add a blank page">
-                    <Plus size={15} />
-                    Add
-                  </button>
-                  <button className="button ghost" onClick={duplicatePage} disabled={isBusy} title="Duplicate current page" aria-label="Duplicate current page">
-                    <FilePlus2 size={15} />
-                    Duplicate
-                  </button>
+                <div className="page-management">
+                  <section className="page-management-section" aria-label="Page selection">
+                    <div className="page-actions">
+                      <button className="button ghost" onClick={selectAllPages} disabled={isBusy} title="Select all pages" aria-label="Select all pages">
+                        Select all
+                      </button>
+                      <button className="button ghost" onClick={clearPageSelection} disabled={isBusy} title="Clear page selection" aria-label="Clear page selection">
+                        Clear
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="page-management-section" aria-label="Add and import pages">
+                    <label>
+                      Blank page
+                      <select value={blankPagePreset} onChange={(event) => setBlankPagePreset(event.target.value as BlankPagePreset)} disabled={isBusy}>
+                        <option value="matchCurrent">Match current page</option>
+                        <option value="a4Portrait">A4 portrait</option>
+                        <option value="a4Landscape">A4 landscape</option>
+                        <option value="a3Portrait">A3 portrait</option>
+                        <option value="a3Landscape">A3 landscape</option>
+                        <option value="letterPortrait">Letter portrait</option>
+                        <option value="letterLandscape">Letter landscape</option>
+                        <option value="legalPortrait">Legal portrait</option>
+                        <option value="legalLandscape">Legal landscape</option>
+                        <option value="custom">Custom points</option>
+                      </select>
+                    </label>
+                    {blankPagePreset === "custom" ? (
+                      <div className="page-field-grid">
+                        <label>
+                          Width
+                          <input type="number" min="72" max="2880" value={customPageWidth} onChange={(event) => setCustomPageWidth(Number(event.target.value))} disabled={isBusy} />
+                        </label>
+                        <label>
+                          Height
+                          <input type="number" min="72" max="2880" value={customPageHeight} onChange={(event) => setCustomPageHeight(Number(event.target.value))} disabled={isBusy} />
+                        </label>
+                      </div>
+                    ) : null}
+                    <div className="page-field-grid">
+                      <label>
+                        Quantity
+                        <input type="number" min="1" max="50" value={blankPageQuantity} onChange={(event) => setBlankPageQuantity(Number(event.target.value))} disabled={isBusy} />
+                      </label>
+                      <label>
+                        Label
+                        <input value={blankPageLabel} onChange={(event) => setBlankPageLabel(event.target.value)} placeholder="Optional" disabled={isBusy} />
+                      </label>
+                    </div>
+                    <div className="page-actions">
+                      <button className="button ghost" onClick={() => insertBlankPages("before")} disabled={isBusy} title="Insert blank page before selection" aria-label="Insert blank page before selection">
+                        Before
+                      </button>
+                      <button className="button ghost" onClick={() => insertBlankPages("after")} disabled={isBusy} title="Insert blank page after selection" aria-label="Insert blank page after selection">
+                        After
+                      </button>
+                      <button className="button ghost" onClick={() => insertBlankPages("start")} disabled={isBusy} title="Insert blank page at document start" aria-label="Insert blank page at document start">
+                        Start
+                      </button>
+                      <button className="button ghost" onClick={() => insertBlankPages("end")} disabled={isBusy} title="Insert blank page at document end" aria-label="Insert blank page at document end">
+                        End
+                      </button>
+                      <button className="button ghost" onClick={() => importPdfInput.current?.click()} disabled={isBusy} title="Import PDF files" aria-label="Import PDF files">
+                        <Files size={15} />
+                        Import
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="page-management-section" aria-label="Page operations">
+                    <div className="page-actions">
+                      <button className="button ghost" onClick={duplicatePage} disabled={isBusy} title="Duplicate selected pages" aria-label="Duplicate selected pages">
+                        <FilePlus2 size={15} />
+                        Duplicate
+                      </button>
+                      <button className="button ghost" onClick={deleteSelectedPages} disabled={isBusy || pages.length === 0} title="Delete selected pages" aria-label="Delete selected pages">
+                        <Trash2 size={15} />
+                        Delete
+                      </button>
+                      <button className="button ghost" onClick={() => void rotateSelectedPages(90)} disabled={isBusy} title="Rotate selected pages clockwise" aria-label="Rotate selected pages clockwise">
+                        Rotate CW
+                      </button>
+                      <button className="button ghost" onClick={() => void rotateSelectedPages(-90)} disabled={isBusy} title="Rotate selected pages counter-clockwise" aria-label="Rotate selected pages counter-clockwise">
+                        Rotate CCW
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="page-management-section" aria-label="Page clipboard and export">
+                    <div className="page-actions">
+                      <button className="button ghost" onClick={copySelectedPages} disabled={isBusy} title="Copy selected pages" aria-label="Copy selected pages">
+                        Copy
+                      </button>
+                      <button className="button ghost" onClick={() => pasteCopiedPages("after")} disabled={isBusy || !copiedPages} title="Paste copied pages after selection" aria-label="Paste copied pages after selection">
+                        Paste
+                      </button>
+                      <button className="button ghost" onClick={() => void extractSelectedPages(false)} disabled={isBusy} title="Extract selected pages as a PDF" aria-label="Extract selected pages as a PDF">
+                        Extract
+                      </button>
+                      <button className="button ghost" onClick={() => void extractSelectedPages(true)} disabled={isBusy || pages.length <= 1} title="Extract selected pages and remove them" aria-label="Extract selected pages and remove them">
+                        Extract/remove
+                      </button>
+                      <button className="button ghost" onClick={() => void splitAfterCurrentPage()} disabled={isBusy || currentPage >= pages.length} title="Split document after current page" aria-label="Split document after current page">
+                        Split
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="page-management-section" aria-label="Page labels">
+                    <label>
+                      Selected page label
+                      <input
+                        value={pages.find((page) => selectedPageIds.includes(page.id))?.label ?? ""}
+                        onChange={(event) => updateSelectedPageLabel(event.target.value)}
+                        placeholder="Cover, Section A, A-01..."
+                        disabled={isBusy}
+                      />
+                    </label>
+                  </section>
                 </div>
               </>
             ) : null}
@@ -1429,8 +1927,15 @@ export function App() {
             onDrop={(event) => {
               event.preventDefault();
               setIsDragging(false);
-              const file = event.dataTransfer.files[0];
-              if (file) void loadFile(file);
+              const files = Array.from(event.dataTransfer.files);
+              const pdfFiles = files.filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+              const file = pdfFiles[0];
+              if (!file) return;
+              if (pdfBytes || pages.some((page) => page.sourceDocumentId)) {
+                void importPdfFiles(pdfFiles, "after");
+                return;
+              }
+              void loadFile(file);
             }}
           >
             {workState ? <ProgressOverlay message={workState.message} progress={workState.progress} /> : null}
@@ -2520,7 +3025,21 @@ function DocumentPage({
       })
       .filter((rect): rect is MarkupRect => Boolean(rect && rect.width > 3 && rect.height > 3));
 
-    if (rects.length > 0) onAddTextMarkup(page.pageNumber, rects);
+    if (rects.length > 0) {
+      onAddTextMarkup(page.pageNumber, rects);
+      return;
+    }
+
+    if (activeTool === "strikethrough") {
+      onAddTextMarkup(page.pageNumber, [
+        {
+          x: clamp(minX, 0, page.width),
+          y: clamp(minY, 0, page.height),
+          width: clamp(maxX - minX, 0, page.width - minX),
+          height: clamp(maxY - minY, 8, page.height - minY),
+        },
+      ]);
+    }
   }
 
   return (
@@ -3715,6 +4234,148 @@ function duplicateMark(mark: Mark, page: number) {
   };
 }
 
+function cloneComment(comment: CommentData): CommentData {
+  const now = new Date().toISOString();
+  return {
+    ...comment,
+    createdAt: now,
+    updatedAt: now,
+    replies: comment.replies.map((reply) => ({
+      ...reply,
+      id: crypto.randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+    })),
+  };
+}
+
+function renumberPages(pages: PageView[]) {
+  return pages.map((page, index) => ({ ...page, pageNumber: index + 1 }));
+}
+
+function remapMarksForPages(marks: Mark[], oldPages: PageView[], nextPages: PageView[]) {
+  const pageIdByOldNumber = new Map(oldPages.map((page) => [page.pageNumber, page.id]));
+  const pageNumberById = new Map(nextPages.map((page) => [page.id, page.pageNumber]));
+  return marks
+    .map((mark) => {
+      const oldPageId = pageIdByOldNumber.get(mark.page);
+      if (!oldPageId) return null;
+      const nextPageNumber = pageNumberById.get(oldPageId);
+      if (!nextPageNumber) return null;
+      return { ...mark, page: nextPageNumber };
+    })
+    .filter((mark): mark is Mark => Boolean(mark));
+}
+
+function createBlankPageView(pageNumber: number, size: { width: number; height: number }, label?: string): PageView {
+  return {
+    id: crypto.randomUUID(),
+    pageNumber,
+    width: size.width * PAGE_SCALE,
+    height: size.height * PAGE_SCALE,
+    rotation: 0,
+    label,
+    isBlank: true,
+    background: "#ffffff",
+    imageUrl: "",
+    textItems: [],
+  };
+}
+
+function getBlankPageSize(preset: BlankPagePreset) {
+  const sizes: Record<Exclude<BlankPagePreset, "matchCurrent" | "custom">, { width: number; height: number }> = {
+    a4Portrait: { width: 595.28, height: 841.89 },
+    a4Landscape: { width: 841.89, height: 595.28 },
+    a3Portrait: { width: 841.89, height: 1190.55 },
+    a3Landscape: { width: 1190.55, height: 841.89 },
+    letterPortrait: { width: 612, height: 792 },
+    letterLandscape: { width: 792, height: 612 },
+    legalPortrait: { width: 612, height: 1008 },
+    legalLandscape: { width: 1008, height: 612 },
+  };
+  if (preset === "custom") return { width: 612, height: 792 };
+  if (preset === "matchCurrent") return { width: 612, height: 792 };
+  return sizes[preset];
+}
+
+async function rotatePageView(page: PageView, delta: 90 | -90): Promise<PageView> {
+  const rotated = {
+    ...page,
+    width: page.height,
+    height: page.width,
+    rotation: normalizePageRotation(page.rotation + delta),
+    textItems: page.textItems.map((item) => rotateRectForPage(item, page, delta)),
+  };
+  if (!page.imageUrl) return rotated;
+  return {
+    ...rotated,
+    imageUrl: await rotateImageDataUrl(page.imageUrl, page.width, page.height, delta),
+  };
+}
+
+function rotateMarkForPage(mark: Mark, page: PageView, delta: 90 | -90): Mark {
+  const rotated = rotateRectForPage(mark, page, delta);
+  const markupRects = mark.markupRects?.map((rect) => rotateRectForPage(rect, page, delta));
+  const strokePoints = mark.strokePoints?.map((point) =>
+    delta === 90 ? { x: page.height - point.y, y: point.x } : { x: point.y, y: page.width - point.x }
+  );
+  return {
+    ...mark,
+    ...rotated,
+    rotation: normalizePageRotation(mark.rotation + delta),
+    markupRects,
+    strokePoints,
+  };
+}
+
+function rotateRectForPage<T extends { x: number; y: number; width: number; height: number }>(rect: T, page: PageView, delta: 90 | -90): T {
+  if (delta === 90) {
+    return { ...rect, x: page.height - (rect.y + rect.height), y: rect.x, width: rect.height, height: rect.width };
+  }
+  return { ...rect, x: rect.y, y: page.width - (rect.x + rect.width), width: rect.height, height: rect.width };
+}
+
+function rotateImageDataUrl(dataUrl: string, width: number, height: number, delta: 90 | -90) {
+  return new Promise<string>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(height);
+      canvas.height = Math.round(width);
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("Could not rotate page image."));
+        return;
+      }
+      if (delta === 90) {
+        context.translate(canvas.width, 0);
+        context.rotate(Math.PI / 2);
+      } else {
+        context.translate(0, canvas.height);
+        context.rotate(-Math.PI / 2);
+      }
+      context.drawImage(image, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = () => reject(new Error("Could not decode page image."));
+    image.src = dataUrl;
+  });
+}
+
+function normalizePageRotation(rotation: number) {
+  return ((rotation % 360) + 360) % 360;
+}
+
+function downloadPdfBytes(bytes: Uint8Array, filename: string) {
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 function getSignaturePlacement(start: StrokePoint, current: StrokePoint, signature: PreparedImage) {
   const dx = current.x - start.x;
   const dy = current.y - start.y;
@@ -4060,6 +4721,34 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       JSON.stringify(mark.strokePoints ?? []) === JSON.stringify(other.strokePoints ?? [])
     );
   });
+}
+
+function arePagesEqual(left: PageView[], right: PageView[]) {
+  if (left.length !== right.length) return false;
+
+  return left.every((page, index) => {
+    const other = right[index];
+    return (
+      other !== undefined &&
+      page.id === other.id &&
+      page.pageNumber === other.pageNumber &&
+      page.sourceDocumentId === other.sourceDocumentId &&
+      page.sourcePageNumber === other.sourcePageNumber &&
+      page.width === other.width &&
+      page.height === other.height &&
+      page.rotation === other.rotation &&
+      page.label === other.label &&
+      page.isBlank === other.isBlank &&
+      page.background === other.background &&
+      page.imageUrl === other.imageUrl &&
+      JSON.stringify(page.textItems) === JSON.stringify(other.textItems)
+    );
+  });
+}
+
+function arraysEqual(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => item === right[index]);
 }
 
 function getMarkLabel(mark: Mark) {

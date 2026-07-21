@@ -380,10 +380,41 @@ button {
   background: #f4f6f8;
 }
 
+.thumb.current,
 .thumb.active {
   border-color: #d8342a;
   background: #fff7f6;
   color: #172033;
+}
+
+.thumb.selected {
+  border-color: #9aa4b2;
+  background: #f8fafc;
+  box-shadow: inset 3px 0 0 #d8342a;
+}
+
+.thumb.current.selected {
+  border-color: #d8342a;
+  background: #fff7f6;
+}
+
+.thumb.drop-before::before,
+.thumb.drop-after::after {
+  position: absolute;
+  right: 7px;
+  left: 7px;
+  height: 2px;
+  border-radius: 999px;
+  background: #d8342a;
+  content: "";
+}
+
+.thumb.drop-before::before {
+  top: -4px;
+}
+
+.thumb.drop-after::after {
+  bottom: -4px;
 }
 
 .thumb-grip {
@@ -419,6 +450,23 @@ button {
   font-weight: 700;
 }
 
+.thumb .page-label,
+.thumb .page-rotation {
+  grid-column: 2;
+  width: 100%;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thumb .page-rotation {
+  color: #9a3412;
+}
+
 .page-actions {
   flex-wrap: wrap;
 }
@@ -428,6 +476,48 @@ button {
   min-height: 32px;
   padding: 0 9px;
   font-size: 12px;
+}
+
+.page-management {
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.page-management-section {
+  display: grid;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid #edf0f4;
+}
+
+.page-management-section label {
+  display: grid;
+  gap: 5px;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.page-management-section input,
+.page-management-section select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #d6dce6;
+  border-radius: 5px;
+  background: #fff;
+  color: #1f2937;
+  font: inherit;
+  font-weight: 500;
+}
+
+.page-field-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
 }
 
 .panel-empty,
