@@ -3474,3 +3474,466 @@ button {
     grid-template-columns: 180px minmax(0, 1fr) 48px;
   }
 }
+
+/* Appearance themes */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+  --app-bg: #f7f8fa;
+  --chrome-bg: #ffffff;
+  --panel-bg: #ffffff;
+  --panel-bg-elevated: #ffffff;
+  --canvas-bg: #e9edf2;
+  --control-bg: #f7f8fa;
+  --control-hover: #f1f3f6;
+  --control-active: #fff4f3;
+  --text-primary: #1f2937;
+  --text-secondary: #667085;
+  --text-muted: #8a94a3;
+  --border-subtle: #e6e9ef;
+  --border-muted: #eef1f5;
+  --accent: #d8342a;
+  --accent-strong: #bf2d25;
+  --accent-soft: #fff4f3;
+  --focus-ring: #d8342a;
+  --shadow-page: 0 16px 36px rgb(15 23 42 / 0.14);
+  --shadow-menu: 0 16px 36px rgb(15 23 42 / 0.12);
+  --danger-bg: #fff1f0;
+  --danger-text: #bf2d25;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --app-bg: #181a1f;
+  --chrome-bg: #181a1f;
+  --panel-bg: #202329;
+  --panel-bg-elevated: #252932;
+  --canvas-bg: #353a43;
+  --control-bg: #252932;
+  --control-hover: #2a2e36;
+  --control-active: #3a2526;
+  --text-primary: #f3f4f6;
+  --text-secondary: #aeb6c3;
+  --text-muted: #7f8998;
+  --border-subtle: #303640;
+  --border-muted: #282e37;
+  --accent: #ff6b61;
+  --accent-strong: #ff867e;
+  --accent-soft: #3a2526;
+  --focus-ring: #ff8a82;
+  --shadow-page: 0 18px 42px rgb(0 0 0 / 0.38);
+  --shadow-menu: 0 18px 42px rgb(0 0 0 / 0.34);
+  --danger-bg: #3a2526;
+  --danger-text: #ff8a82;
+}
+
+:root[data-theme] {
+  --pp-border: var(--border-subtle);
+  --pp-border-soft: var(--border-muted);
+  --pp-surface: var(--panel-bg);
+  --pp-surface-muted: var(--control-bg);
+  --pp-surface-hover: var(--control-hover);
+  --pp-text: var(--text-primary);
+  --pp-text-muted: var(--text-secondary);
+  --pp-accent: var(--accent);
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--text-primary);
+}
+
+.app-shell {
+  background: var(--app-bg);
+  color: var(--text-primary);
+}
+
+.app-chrome,
+.main-toolbar,
+.workspace-nav,
+.left-panel,
+.inspector,
+.statusbar {
+  background: var(--chrome-bg);
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+.left-panel,
+.inspector,
+.workspace-nav {
+  background: var(--panel-bg);
+}
+
+.workspace {
+  background: var(--app-bg);
+  border-color: var(--border-subtle);
+}
+
+.editor {
+  background: var(--canvas-bg);
+}
+
+.document-page {
+  background: #ffffff;
+  box-shadow: var(--shadow-page);
+}
+
+.product-name,
+.toolbar-context span,
+.left-panel .panel-header h2,
+.inspector-header h2,
+.tool-card strong,
+.publish-ready strong,
+.property-readout strong,
+.document-stats strong,
+.thumb span,
+.comment-entry strong,
+.left-comment strong,
+.reply-item strong {
+  color: var(--text-primary);
+}
+
+.document-title,
+.toolbar-context strong,
+.left-panel .panel-header span,
+.inspector-header span,
+.workspace-button small,
+.tool-card small,
+.publish-ready span,
+.property-readout,
+.document-stats span,
+.thumb small,
+.page-meta,
+.page-label,
+.muted-text,
+.dialog-note,
+.comment-entry small,
+.comment-entry span,
+.left-comment small,
+.left-comment span,
+.statusbar,
+.statusbar-meta {
+  color: var(--text-secondary);
+}
+
+.workspace-nav-label,
+.control-stack label,
+.dialog-body label,
+.page-label-inline,
+.inspector-section summary {
+  color: var(--text-muted);
+}
+
+.document-title,
+.searchbox,
+.searchbox input,
+.control-stack input,
+.control-stack select,
+.control-stack textarea,
+.dialog-body input,
+.dialog-body select,
+.dialog-body textarea,
+.page-label-inline input,
+.text-box-editor,
+.comment-filters button,
+.segmented button {
+  background: var(--control-bg);
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+.chrome-button,
+.tool-button,
+.toolbar-menu summary,
+.status-button,
+.status-text-button,
+.panel-icon-button,
+.rail-button,
+.right-panel-reopen,
+.button.ghost,
+.link-button {
+  color: var(--text-secondary);
+}
+
+.chrome-button:hover:not(:disabled),
+.tool-button:hover:not(:disabled),
+.toolbar-menu summary:hover,
+.toolbar-menu[open] summary,
+.status-button:hover:not(:disabled),
+.status-text-button:hover:not(:disabled),
+.panel-icon-button:hover,
+.rail-button:hover,
+.right-panel-reopen:hover,
+.button.ghost:hover:not(:disabled),
+.link-button:hover,
+.comment-filters button:hover:not(:disabled),
+.segmented button:hover:not(:disabled) {
+  background: var(--control-hover);
+  color: var(--text-primary);
+}
+
+.chrome-button.primary,
+.button.primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.chrome-button.primary:hover:not(:disabled),
+.button.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  color: #ffffff;
+}
+
+.workspace-button {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.workspace-button:hover,
+.tool-card:hover,
+.thumb:hover {
+  background: var(--control-hover);
+  color: var(--text-primary);
+}
+
+.workspace-button.active,
+.tool-button.active,
+.menu-tool-button.active,
+.comment-filters button.active,
+.segmented button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.workspace-button.active small {
+  color: var(--text-secondary);
+}
+
+.tool-card,
+.publish-ready,
+.inspector-section,
+.comments-panel,
+.document-stats > div,
+.reply-item,
+.comment-entry,
+.left-comment,
+.panel-empty,
+.empty-panel {
+  background: transparent;
+  border-color: var(--border-muted);
+  color: var(--text-primary);
+}
+
+.thumb.selected {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.thumb.current,
+.thumb-page {
+  background: var(--panel-bg-elevated);
+}
+
+.thumb.selected .thumb-page,
+.thumb.current .thumb-page {
+  background: var(--control-bg);
+}
+
+.toolbar-menu-panel,
+.panel-menu-list,
+.chrome-menu-panel,
+.page-context-menu,
+.modal-card {
+  background: var(--panel-bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-menu);
+}
+
+.modal-backdrop {
+  background: rgb(15 23 42 / 0.36);
+}
+
+.modal-header,
+.panel-header,
+.inspector-header,
+.page-panel-toolbar,
+.reply-item,
+.comment-entry,
+.merge-item {
+  border-color: var(--border-muted);
+}
+
+.menu-tool-button,
+.panel-menu-list button,
+.chrome-menu-panel button,
+.page-context-menu button {
+  color: var(--text-primary);
+}
+
+.menu-tool-button:hover:not(:disabled),
+.panel-menu-list button:hover:not(:disabled),
+.chrome-menu-panel button:hover:not(:disabled),
+.page-context-menu button:hover:not(:disabled) {
+  background: var(--control-hover);
+  color: var(--accent);
+}
+
+.panel-menu-list button.danger,
+.page-context-menu button.danger,
+.button.danger {
+  color: var(--danger-text);
+}
+
+.status-message.error,
+.error-text {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  border-color: color-mix(in srgb, var(--danger-text) 34%, transparent);
+}
+
+.comment-status,
+.comment-status.resolved {
+  background: var(--control-bg);
+  color: var(--text-primary);
+  border-color: var(--border-muted);
+}
+
+.comment-entry.active,
+.left-comment:hover,
+.left-comment:focus-visible {
+  background: var(--control-hover);
+}
+
+.comment-entry-dot {
+  box-shadow: 0 0 0 2px var(--panel-bg);
+}
+
+.appearance-menu {
+  display: grid;
+  gap: var(--pp-space-1);
+  padding-top: var(--pp-space-2);
+  margin-top: var(--pp-space-1);
+  border-top: 1px solid var(--border-muted);
+}
+
+.appearance-menu > span {
+  padding: var(--pp-space-1) var(--pp-space-2);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.appearance-menu button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+}
+
+.appearance-menu button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.appearance-menu button small {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: capitalize;
+}
+
+.button:focus-visible,
+.tool-button:focus-visible,
+.rail-button:focus-visible,
+.chrome-button:focus-visible,
+.toolbar-menu summary:focus-visible,
+.status-button:focus-visible,
+.status-text-button:focus-visible,
+.panel-icon-button:focus-visible,
+.thumb:focus-visible,
+.workspace-button:focus-visible,
+.tool-card:focus-visible,
+.menu-tool-button:focus-visible,
+.panel-menu-list button:focus-visible,
+.chrome-menu-panel button:focus-visible,
+.page-context-menu button:focus-visible,
+.comment-filters button:focus-visible,
+.comment-entry:focus-visible,
+.link-button:focus-visible,
+.searchbox input:focus-visible,
+.control-stack textarea:focus-visible,
+.control-stack select:focus-visible,
+.control-stack input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+:root[data-theme="dark"] .chrome-button.primary,
+:root[data-theme="dark"] .button.primary {
+  color: #181a1f;
+}
+
+:root[data-theme="dark"] .document-title,
+:root[data-theme="dark"] .chrome-button:not(.primary),
+:root[data-theme="dark"] .tool-button,
+:root[data-theme="dark"] .toolbar-menu summary,
+:root[data-theme="dark"] .status-button,
+:root[data-theme="dark"] .status-text-button,
+:root[data-theme="dark"] .button.ghost,
+:root[data-theme="dark"] .panel-icon-button,
+:root[data-theme="dark"] .right-panel-reopen,
+:root[data-theme="dark"] .searchbox,
+:root[data-theme="dark"] .control-stack input,
+:root[data-theme="dark"] .control-stack select,
+:root[data-theme="dark"] .control-stack textarea,
+:root[data-theme="dark"] .dialog-body input,
+:root[data-theme="dark"] .dialog-body select,
+:root[data-theme="dark"] .dialog-body textarea,
+:root[data-theme="dark"] .page-label-inline input {
+  border-color: transparent;
+  background: transparent;
+}
+
+:root[data-theme="dark"] .button.ghost,
+:root[data-theme="dark"] .dialog-actions .button.ghost {
+  background: var(--control-bg);
+  color: var(--text-primary);
+}
+
+:root[data-theme="dark"] .button.ghost:hover:not(:disabled),
+:root[data-theme="dark"] .dialog-actions .button.ghost:hover:not(:disabled) {
+  background: var(--control-hover);
+}
+
+:root[data-theme="dark"] .tool-button:hover:not(:disabled),
+:root[data-theme="dark"] .toolbar-menu summary:hover,
+:root[data-theme="dark"] .toolbar-menu[open] summary,
+:root[data-theme="dark"] .status-button:hover:not(:disabled),
+:root[data-theme="dark"] .status-text-button:hover:not(:disabled),
+:root[data-theme="dark"] .chrome-button:hover:not(:disabled) {
+  background: var(--control-hover);
+}
+
+:root[data-theme="dark"] .tool-button.active,
+:root[data-theme="dark"] .menu-tool-button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+:root[data-theme="dark"] .thumb span,
+:root[data-theme="dark"] .thumb.selected span,
+:root[data-theme="dark"] .thumb.current span {
+  color: var(--text-primary);
+}
+
+:root[data-theme="dark"] .thumb-page img,
+:root[data-theme="dark"] .document-page canvas,
+:root[data-theme="dark"] .document-page img,
+:root[data-theme="dark"] .text-layer {
+  filter: none;
+}
+
+:root[data-theme="dark"] .thumb.selected {
+  box-shadow: inset 2px 0 0 var(--accent);
+}

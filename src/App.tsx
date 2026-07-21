@@ -87,9 +87,11 @@ import {
   type ShapeKind,
   type ShapeStyle,
 } from "./shapes";
-import { AppChrome } from "./components/app-shell/AppChrome";
+import { AppChrome, type ThemeMode } from "./components/app-shell/AppChrome";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
+
+const THEME_STORAGE_KEY = "publish-pro-theme";
 
 type ShapeTool = `shape:${ShapeKind}`;
 type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | ShapeTool | TextMarkupKind;
@@ -266,6 +268,8 @@ const initialMarks: Mark[] = [
 ];
 
 export function App() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredThemeMode());
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">(() => resolveThemeMode(getStoredThemeMode()));
   const [pdfName, setPdfName] = useState("Untitled document");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
@@ -372,6 +376,28 @@ export function App() {
     if (workspace === "publish") setLeftPanel("insert");
     if (workspace === "annotate") setLeftPanel("comments");
   }
+
+  function changeThemeMode(mode: ThemeMode) {
+    setThemeMode(mode);
+    window.localStorage.setItem(THEME_STORAGE_KEY, mode);
+  }
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+    function applyTheme() {
+      const nextResolvedTheme = resolveThemeMode(themeMode);
+      setResolvedTheme(nextResolvedTheme);
+      document.documentElement.dataset.themePreference = themeMode;
+      document.documentElement.dataset.theme = nextResolvedTheme;
+      document.documentElement.style.colorScheme = nextResolvedTheme;
+    }
+
+    applyTheme();
+    if (themeMode !== "system") return undefined;
+    mediaQuery.addEventListener("change", applyTheme);
+    return () => mediaQuery.removeEventListener("change", applyTheme);
+  }, [themeMode]);
 
   function getPageByNumber(pageNumber: number) {
     return pages.find((page) => page.pageNumber === pageNumber) ?? pages[0];
@@ -2027,6 +2053,9 @@ export function App() {
         documentName={pdfName}
         isBusy={isBusy}
         hasUnsavedChanges={history.past.length > 0}
+        themeMode={themeMode}
+        resolvedTheme={resolvedTheme}
+        onThemeChange={changeThemeMode}
         onOpen={() => fileInput.current?.click()}
         onExport={() => void exportPdf()}
       />
@@ -4383,6 +4412,19 @@ function getWorkspaceEmptyInspectorMessage(workspace: WorkspaceMode) {
   if (workspace === "review") return "Select a comment to review replies, status, and marker colour.";
   if (workspace === "assemble") return "Import PDFs or use the project asset actions to build this publication.";
   return "Ready to export. Choose export from the toolbar or Publish panel.";
+}
+
+function getStoredThemeMode(): ThemeMode {
+  if (typeof window === "undefined") return "system";
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+}
+
+function resolveThemeMode(mode: ThemeMode): "light" | "dark" {
+  if (mode === "dark") return "dark";
+  if (mode === "light") return "light";
+  if (typeof window === "undefined") return "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function ProgressOverlay({ message, progress }: WorkState) {
