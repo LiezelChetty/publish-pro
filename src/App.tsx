@@ -5,6 +5,7 @@ import {
   Image as ImageIcon,
   MousePointer2,
   PenLine,
+  Pencil,
   Plus,
   Redo2,
   Search,
@@ -28,11 +29,16 @@ import { ChangeEvent, PointerEvent, ReactElement, useEffect, useMemo, useRef, us
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image";
-type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image";
+type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw";
+type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke";
 type WorkState = {
   message: string;
   progress?: number;
+};
+
+type StrokePoint = {
+  x: number;
+  y: number;
 };
 
 type Mark = {
@@ -52,6 +58,8 @@ type Mark = {
   imageName?: string;
   imageNaturalWidth?: number;
   imageNaturalHeight?: number;
+  strokePoints?: StrokePoint[];
+  strokeOpacity?: number;
 };
 
 type HistoryEntry = {
@@ -127,6 +135,9 @@ export function App() {
   const [marks, setMarks] = useState<Mark[]>(initialMarks);
   const [history, setHistory] = useState<HistoryState>({ past: [], future: [] });
   const [activeTool, setActiveTool] = useState<Tool>("select");
+  const [penColor, setPenColor] = useState("#111827");
+  const [penWidth, setPenWidth] = useState(4);
+  const [penOpacity, setPenOpacity] = useState(1);
   const [selectedMark, setSelectedMark] = useState<string | null>("demo-title");
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
@@ -350,6 +361,7 @@ export function App() {
       imageInput.current?.click();
       return;
     }
+    if (activeTool === "draw") return;
 
     const mark: Mark = {
       id: crypto.randomUUID(),
@@ -388,6 +400,30 @@ export function App() {
     const nextMarks = marks.map((mark) => (mark.id === afterMark.id ? clampMarkToPage(afterMark, pages) : mark));
     const beforeMarks = marks.map((mark) => (mark.id === beforeMark.id ? beforeMark : mark));
     commitMarks(nextMarks, selectedMark, beforeMarks);
+  }
+
+  function addStroke(pageNumber: number, points: StrokePoint[]) {
+    const smoothedPoints = smoothStrokePoints(points);
+    const bounds = getStrokeBounds(smoothedPoints, penWidth);
+    if (!bounds) return;
+
+    const stroke: Mark = {
+      id: crypto.randomUUID(),
+      kind: "stroke",
+      page: pageNumber,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      text: "Freehand stroke",
+      color: penColor,
+      size: penWidth,
+      rotation: 0,
+      strokePoints: smoothedPoints,
+      strokeOpacity: penOpacity,
+    };
+
+    commitMarks([...marks, clampMarkToPage(stroke, pages)], stroke.id);
   }
 
   function removeSelectedMark() {
@@ -501,6 +537,36 @@ export function App() {
             height: markHeight,
             rotate: degrees(mark.rotation),
           });
+          continue;
+        }
+
+        if (mark.kind === "stroke" && mark.strokePoints && mark.strokePoints.length > 0) {
+          const exportedPoints = smoothStrokePoints(mark.strokePoints).map((point) => ({
+            x: (point.x / sourcePage.width) * width,
+            y: height - (point.y / sourcePage.height) * height,
+          }));
+          const strokeWidth = Math.max(0.5, (mark.size / sourcePage.height) * height);
+
+          if (exportedPoints.length === 1) {
+            const point = exportedPoints[0];
+            page.drawCircle({
+              x: point.x,
+              y: point.y,
+              size: strokeWidth / 2,
+              color: colorToRgb(mark.color),
+              opacity: mark.strokeOpacity ?? 1,
+            });
+          }
+
+          for (let pointIndex = 1; pointIndex < exportedPoints.length; pointIndex += 1) {
+            page.drawLine({
+              start: exportedPoints[pointIndex - 1],
+              end: exportedPoints[pointIndex],
+              thickness: strokeWidth,
+              color: colorToRgb(mark.color),
+              opacity: mark.strokeOpacity ?? 1,
+            });
+          }
           continue;
         }
 
@@ -627,6 +693,7 @@ export function App() {
             <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
             <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
             <ToolButton icon={<Highlighter />} label="Add highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+            <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
             <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
             <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
             <ToolButton
@@ -680,8 +747,13 @@ export function App() {
                   marks={marks.filter((mark) => mark.page === page.pageNumber)}
                   zoom={zoom}
                   selectedMark={selectedMark}
+                  activeTool={activeTool}
+                  penColor={penColor}
+                  penWidth={penWidth}
+                  penOpacity={penOpacity}
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
+                  onAddStroke={addStroke}
                   onPreviewMark={previewMark}
                   onCommitMarkChange={commitMarkChange}
                 />
@@ -691,6 +763,72 @@ export function App() {
 
         <aside className="inspector">
           <h2>Properties</h2>
+          {activeTool === "draw" ? (
+            <div className="control-stack pen-controls">
+              <label>
+                Stroke colour
+                <input type="color" value={penColor} onChange={(event) => setPenColor(event.currentTarget.value)} aria-label="Pen stroke colour" />
+              </label>
+              <label>
+                Colour hex
+                <input
+                  type="text"
+                  value={penColor}
+                  onChange={(event) => {
+                    const color = normalizeHexColor(event.currentTarget.value);
+                    if (color) setPenColor(color);
+                  }}
+                  aria-label="Pen stroke colour hex"
+                />
+              </label>
+              <label>
+                Stroke width
+                <input
+                  type="range"
+                  min="1"
+                  max="24"
+                  value={penWidth}
+                  onChange={(event) => setPenWidth(Number(event.currentTarget.value))}
+                  aria-label="Pen stroke width"
+                />
+              </label>
+              <label>
+                Width value
+                <input
+                  type="number"
+                  min="1"
+                  max="24"
+                  value={penWidth}
+                  onChange={(event) => setPenWidth(clamp(Number(event.currentTarget.value), 1, 24))}
+                  aria-label="Pen stroke width value"
+                />
+              </label>
+              <label>
+                Opacity
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={penOpacity}
+                  onChange={(event) => setPenOpacity(Number(event.currentTarget.value))}
+                  aria-label="Pen opacity"
+                />
+              </label>
+              <label>
+                Opacity value
+                <input
+                  type="number"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={penOpacity}
+                  onChange={(event) => setPenOpacity(clamp(Number(event.currentTarget.value), 0.1, 1))}
+                  aria-label="Pen opacity value"
+                />
+              </label>
+            </div>
+          ) : null}
           {selected ? (
             <div className="control-stack">
               <label>
@@ -710,6 +848,18 @@ export function App() {
                   onChange={(event) => updateMark(selected.id, { color: event.currentTarget.value })}
                   onInput={(event) => updateMark(selected.id, { color: event.currentTarget.value })}
                   aria-label="Annotation color"
+                />
+              </label>
+              <label>
+                Colour hex
+                <input
+                  type="text"
+                  value={selected.color}
+                  onChange={(event) => {
+                    const color = normalizeHexColor(event.currentTarget.value);
+                    if (color) updateMark(selected.id, { color });
+                  }}
+                  aria-label="Annotation color hex"
                 />
               </label>
               <label>
@@ -745,6 +895,34 @@ export function App() {
                       value={Math.round(selected.rotation)}
                       onChange={(event) => updateMark(selected.id, { rotation: Number(event.target.value) })}
                       aria-label="Image rotation degrees"
+                    />
+                  </label>
+                </>
+              ) : null}
+              {selected.kind === "stroke" ? (
+                <>
+                  <label>
+                    Opacity
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                      value={selected.strokeOpacity ?? 1}
+                      onChange={(event) => updateMark(selected.id, { strokeOpacity: Number(event.target.value) })}
+                      aria-label="Stroke opacity"
+                    />
+                  </label>
+                  <label>
+                    Opacity value
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                      value={selected.strokeOpacity ?? 1}
+                      onChange={(event) => updateMark(selected.id, { strokeOpacity: clamp(Number(event.currentTarget.value), 0.1, 1) })}
+                      aria-label="Stroke opacity value"
                     />
                   </label>
                 </>
@@ -798,8 +976,13 @@ function DocumentPage({
   marks,
   zoom,
   selectedMark,
+  activeTool,
+  penColor,
+  penWidth,
+  penOpacity,
   onSelect,
   onAddMark,
+  onAddStroke,
   onPreviewMark,
   onCommitMarkChange,
 }: {
@@ -807,8 +990,13 @@ function DocumentPage({
   marks: Mark[];
   zoom: number;
   selectedMark: string | null;
+  activeTool: Tool;
+  penColor: string;
+  penWidth: number;
+  penOpacity: number;
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
+  onAddStroke: (page: number, points: StrokePoint[]) => void;
   onPreviewMark: (id: string, patch: Partial<Mark>) => void;
   onCommitMarkChange: (beforeMark: Mark, afterMark: Mark) => void;
 }) {
@@ -821,13 +1009,14 @@ function DocumentPage({
     mode: "move" | "resize";
     corner?: "nw" | "ne" | "sw" | "se";
   } | null>(null);
+  const [draftStroke, setDraftStroke] = useState<StrokePoint[]>([]);
 
   function pagePoint(event: PointerEvent<HTMLDivElement>) {
     const bounds = pageRef.current?.getBoundingClientRect();
     if (!bounds) return { x: 0, y: 0 };
     return {
-      x: (event.clientX - bounds.left) / zoom,
-      y: (event.clientY - bounds.top) / zoom,
+      x: clamp((event.clientX - bounds.left) / zoom, 0, page.width),
+      y: clamp((event.clientY - bounds.top) / zoom, 0, page.height),
     };
   }
 
@@ -839,10 +1028,20 @@ function DocumentPage({
       onPointerDown={(event) => {
         if ((event.target as HTMLElement).closest(".mark")) return;
         const point = pagePoint(event);
+        if (activeTool === "draw") {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          onSelect(null);
+          setDraftStroke([point]);
+          return;
+        }
         onSelect(null);
         onAddMark(page.pageNumber, point.x, point.y);
       }}
           onPointerMove={(event) => {
+            if (draftStroke.length > 0) {
+              setDraftStroke((existing) => [...existing, pagePoint(event)]);
+              return;
+            }
             const drag = dragRef.current;
             if (!drag) return;
             const activeMark = marks.find((mark) => mark.id === drag.before.id);
@@ -852,18 +1051,18 @@ function DocumentPage({
             const latest =
               drag.mode === "resize" && drag.corner
                 ? resizeMarkFromCorner(drag.before, drag.corner, dx, dy, [page])
-                : clampMarkToPage(
-                    {
-                      ...activeMark,
-                      x: drag.before.x + dx,
-                      y: drag.before.y + dy,
-                    },
-                    [page]
-                  );
+                : moveMarkBy(drag.before, dx, dy, [page]);
             dragRef.current = { ...drag, latest };
             onPreviewMark(activeMark.id, latest);
           }}
-      onPointerUp={() => {
+      onPointerUp={(event) => {
+        if (draftStroke.length > 0) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+          const nextStroke = [...draftStroke, pagePoint(event)];
+          setDraftStroke([]);
+          onAddStroke(page.pageNumber, nextStroke);
+          return;
+        }
         const drag = dragRef.current;
         dragRef.current = null;
         if (drag && !areMarksEqual([drag.before], [drag.latest])) {
@@ -871,6 +1070,7 @@ function DocumentPage({
         }
       }}
       onPointerLeave={() => {
+        if (draftStroke.length > 0) return;
         const drag = dragRef.current;
         dragRef.current = null;
         if (drag && !areMarksEqual([drag.before], [drag.latest])) {
@@ -879,6 +1079,19 @@ function DocumentPage({
       }}
     >
       {page.imageUrl ? <img className="pdf-image" src={page.imageUrl} alt={`Page ${page.pageNumber}`} /> : <BlankPage />}
+      {draftStroke.length > 0 ? (
+        <svg className="draft-stroke-layer" viewBox={`0 0 ${page.width} ${page.height}`} aria-hidden="true">
+          <path
+            d={pointsToSvgPath(smoothStrokePoints(draftStroke))}
+            fill="none"
+            stroke={penColor}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeOpacity={penOpacity}
+            strokeWidth={penWidth}
+          />
+        </svg>
+      ) : null}
       {marks.map((mark) => (
         <button
           className={`mark mark-${mark.kind} ${selectedMark === mark.id ? "selected" : ""}`}
@@ -908,7 +1121,20 @@ function DocumentPage({
           }}
         >
           {mark.kind === "image" && mark.imageDataUrl ? <img className="image-mark-media" src={mark.imageDataUrl} alt={mark.imageName || "Image annotation"} /> : null}
-          {mark.kind !== "highlight" && mark.kind !== "image" ? mark.text : ""}
+          {mark.kind === "stroke" && mark.strokePoints ? (
+            <svg className="stroke-mark-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
+              <path
+                d={pointsToSvgPath(pointsRelativeToMark(smoothStrokePoints(mark.strokePoints), mark))}
+                fill="none"
+                stroke={mark.color}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeOpacity={mark.strokeOpacity ?? 1}
+                strokeWidth={mark.size}
+              />
+            </svg>
+          ) : null}
+          {mark.kind !== "highlight" && mark.kind !== "image" && mark.kind !== "stroke" ? mark.text : ""}
           {mark.kind === "image" && selectedMark === mark.id
             ? (["nw", "ne", "sw", "se"] as const).map((corner) => (
                 <span
@@ -1094,6 +1320,12 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+function normalizeHexColor(value: string) {
+  const trimmed = value.trim();
+  const prefixed = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
+  return /^#[0-9a-f]{6}$/i.test(prefixed) ? prefixed.toLowerCase() : null;
+}
+
 function clampMarkToPage(mark: Mark, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
   const page = pages.find((item) => item.pageNumber === mark.page);
   if (!page) return mark;
@@ -1132,6 +1364,86 @@ function resizeMarkFromCorner(mark: Mark, corner: "nw" | "ne" | "sw" | "se", dx:
   );
 }
 
+function moveMarkBy(mark: Mark, dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
+  if (mark.kind !== "stroke" || !mark.strokePoints) {
+    return clampMarkToPage({ ...mark, x: mark.x + dx, y: mark.y + dy }, pages);
+  }
+
+  const movedPoints = mark.strokePoints.map((point) => ({ x: point.x + dx, y: point.y + dy }));
+  const bounds = getStrokeBounds(movedPoints, mark.size);
+  if (!bounds) return mark;
+
+  const page = pages.find((item) => item.pageNumber === mark.page);
+  if (!page) return { ...mark, strokePoints: movedPoints, ...bounds };
+
+  const correctionX = bounds.x < 0 ? -bounds.x : bounds.x + bounds.width > page.width ? page.width - (bounds.x + bounds.width) : 0;
+  const correctionY = bounds.y < 0 ? -bounds.y : bounds.y + bounds.height > page.height ? page.height - (bounds.y + bounds.height) : 0;
+  const correctedPoints = movedPoints.map((point) => ({ x: point.x + correctionX, y: point.y + correctionY }));
+  const correctedBounds = getStrokeBounds(correctedPoints, mark.size);
+
+  return {
+    ...mark,
+    ...(correctedBounds ?? bounds),
+    strokePoints: correctedPoints,
+  };
+}
+
+function smoothStrokePoints(points: StrokePoint[]) {
+  if (points.length <= 2) return points;
+
+  const smoothed: StrokePoint[] = [points[0]];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const next = points[index + 1];
+    smoothed.push({
+      x: (previous.x + current.x * 2 + next.x) / 4,
+      y: (previous.y + current.y * 2 + next.y) / 4,
+    });
+  }
+  smoothed.push(points[points.length - 1]);
+  return smoothed;
+}
+
+function pointsToSvgPath(points: StrokePoint[]) {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y} L ${points[0].x + 0.01} ${points[0].y + 0.01}`;
+
+  let path = `M ${points[0].x} ${points[0].y}`;
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    const midX = (current.x + next.x) / 2;
+    const midY = (current.y + next.y) / 2;
+    path += ` Q ${current.x} ${current.y} ${midX} ${midY}`;
+  }
+
+  const last = points[points.length - 1];
+  path += ` L ${last.x} ${last.y}`;
+  return path;
+}
+
+function pointsRelativeToMark(points: StrokePoint[], mark: Mark) {
+  return points.map((point) => ({ x: point.x - mark.x, y: point.y - mark.y }));
+}
+
+function getStrokeBounds(points: StrokePoint[], strokeWidth: number) {
+  if (points.length === 0) return null;
+
+  const padding = Math.max(2, strokeWidth / 2 + 2);
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+
+  return {
+    x: minX - padding,
+    y: minY - padding,
+    width: Math.max(strokeWidth + padding * 2, maxX - minX + padding * 2),
+    height: Math.max(strokeWidth + padding * 2, maxY - minY + padding * 2),
+  };
+}
+
 function areMarksEqual(left: Mark[], right: Mark[]) {
   if (left.length !== right.length) return false;
 
@@ -1154,12 +1466,15 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       mark.imageMimeType === other.imageMimeType &&
       mark.imageName === other.imageName &&
       mark.imageNaturalWidth === other.imageNaturalWidth &&
-      mark.imageNaturalHeight === other.imageNaturalHeight
+      mark.imageNaturalHeight === other.imageNaturalHeight &&
+      mark.strokeOpacity === other.strokeOpacity &&
+      JSON.stringify(mark.strokePoints ?? []) === JSON.stringify(other.strokePoints ?? [])
     );
   });
 }
 
 function getMarkLabel(mark: Mark) {
+  if (mark.kind === "stroke") return "Freehand stroke annotation";
   if (mark.kind === "image") return `Image annotation: ${mark.imageName || mark.text || "Image"}`;
   if (mark.kind === "highlight") return "Highlight annotation";
   if (mark.kind === "signature") return `Signature annotation: ${mark.text}`;
