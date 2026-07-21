@@ -16,7 +16,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import { degrees, PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import {
   GlobalWorkerOptions,
   getDocument,
@@ -28,8 +28,8 @@ import { ChangeEvent, PointerEvent, ReactElement, useEffect, useMemo, useRef, us
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "signature" | "stamp";
-type MarkKind = "text" | "highlight" | "signature" | "stamp";
+type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image";
+type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image";
 type WorkState = {
   message: string;
   progress?: number;
@@ -46,6 +46,12 @@ type Mark = {
   text: string;
   color: string;
   size: number;
+  rotation: number;
+  imageDataUrl?: string;
+  imageMimeType?: "image/png" | "image/jpeg";
+  imageName?: string;
+  imageNaturalWidth?: number;
+  imageNaturalHeight?: number;
 };
 
 type HistoryEntry = {
@@ -95,6 +101,7 @@ const initialMarks: Mark[] = [
     text: "Drop a PDF to begin",
     color: "#1f2937",
     size: 24,
+    rotation: 0,
   },
   {
     id: "demo-note",
@@ -107,6 +114,7 @@ const initialMarks: Mark[] = [
     text: "READY",
     color: BRAND_RED,
     size: 16,
+    rotation: 0,
   },
 ];
 
@@ -126,6 +134,7 @@ export function App() {
   const [workState, setWorkState] = useState<WorkState | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const imageInput = useRef<HTMLInputElement>(null);
 
   const selected = marks.find((mark) => mark.id === selectedMark) ?? null;
   const isBusy = workState !== null;
@@ -163,6 +172,23 @@ export function App() {
       window.removeEventListener("keydown", handleKeyboardShortcut);
     };
   }, [history, isBusy]);
+
+  useEffect(() => {
+    function handleDeleteShortcut(event: KeyboardEvent) {
+      if (isBusy || !selectedMark) return;
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (isEditableElement(event.target)) return;
+
+      event.preventDefault();
+      removeSelectedMark();
+    }
+
+    window.addEventListener("keydown", handleDeleteShortcut);
+
+    return () => {
+      window.removeEventListener("keydown", handleDeleteShortcut);
+    };
+  }, [isBusy, selectedMark, marks]);
 
   useEffect(() => {
     if (!pdfDoc) return;
@@ -260,6 +286,49 @@ export function App() {
     event.target.value = "";
   }
 
+  async function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      setErrorMessage("");
+      setWorkState({ message: `Preparing ${file.name}`, progress: 15 });
+      const image = await prepareImageAnnotation(file);
+      const page = pages.find((item) => item.pageNumber === currentPage) ?? pages[0];
+      const maxWidth = page.width * 0.36;
+      const maxHeight = page.height * 0.28;
+      const scale = Math.min(maxWidth / image.width, maxHeight / image.height, 1);
+      const width = Math.max(48, image.width * scale);
+      const height = Math.max(48, image.height * scale);
+      const mark: Mark = {
+        id: crypto.randomUUID(),
+        kind: "image",
+        page: currentPage,
+        x: (page.width - width) / 2,
+        y: (page.height - height) / 2,
+        width,
+        height,
+        text: image.name,
+        color: "#111827",
+        size: 16,
+        rotation: 0,
+        imageDataUrl: image.dataUrl,
+        imageMimeType: image.mimeType,
+        imageName: image.name,
+        imageNaturalWidth: image.width,
+        imageNaturalHeight: image.height,
+      };
+
+      commitMarks([...marks, clampMarkToPage(mark, pages)], mark.id);
+      setActiveTool("select");
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(getImageErrorMessage(error));
+    }
+  }
+
   function addPage() {
     const pageNumber = pages.length + 1;
     setPages((existing) => [
@@ -277,6 +346,10 @@ export function App() {
 
   function addMark(pageNumber: number, x: number, y: number) {
     if (activeTool === "select") return;
+    if (activeTool === "image") {
+      imageInput.current?.click();
+      return;
+    }
 
     const mark: Mark = {
       id: crypto.randomUUID(),
@@ -296,6 +369,7 @@ export function App() {
               : "",
       color: activeTool === "highlight" ? "#facc15" : activeTool === "stamp" ? BRAND_RED : "#111827",
       size: activeTool === "text" ? 18 : 16,
+      rotation: 0,
     };
 
     commitMarks([...marks, mark], mark.id);
@@ -397,11 +471,11 @@ export function App() {
         }
       }
 
-      marks.forEach((mark, index) => {
+      for (const [index, mark] of marks.entries()) {
         setWorkState({ message: "Applying annotations", progress: 20 + (index / Math.max(1, marks.length)) * 60 });
         const page = exportedPdf.getPage(mark.page - 1);
         const sourcePage = pages.find((item) => item.pageNumber === mark.page);
-        if (!sourcePage) return;
+        if (!sourcePage) continue;
 
         const { width, height } = page.getSize();
         const x = (mark.x / sourcePage.width) * width;
@@ -409,6 +483,26 @@ export function App() {
         const markWidth = (mark.width / sourcePage.width) * width;
         const markHeight = (mark.height / sourcePage.height) * height;
         const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
+
+        if (mark.kind === "image" && mark.imageDataUrl) {
+          const imageBytes = dataUrlToBytes(mark.imageDataUrl);
+          const embeddedImage =
+            mark.imageMimeType === "image/jpeg" ? await exportedPdf.embedJpg(imageBytes) : await exportedPdf.embedPng(imageBytes);
+          const rotation = degreesToRadians(mark.rotation);
+          const centerX = x + markWidth / 2;
+          const centerY = y + markHeight / 2;
+          const rotatedX = centerX - (markWidth / 2) * Math.cos(rotation) + (markHeight / 2) * Math.sin(rotation);
+          const rotatedY = centerY - (markWidth / 2) * Math.sin(rotation) - (markHeight / 2) * Math.cos(rotation);
+
+          page.drawImage(embeddedImage, {
+            x: rotatedX,
+            y: rotatedY,
+            width: markWidth,
+            height: markHeight,
+            rotate: degrees(mark.rotation),
+          });
+          continue;
+        }
 
         if (mark.kind === "highlight") {
           page.drawRectangle({
@@ -419,7 +513,7 @@ export function App() {
             color: colorToRgb(mark.color),
             opacity: 0.45,
           });
-          return;
+          continue;
         }
 
         if (mark.kind === "stamp") {
@@ -440,7 +534,7 @@ export function App() {
           font: mark.kind === "stamp" ? helveticaBold : helvetica,
           color: colorToRgb(mark.color),
         });
-      });
+      }
 
       setWorkState({ message: "Saving PDF", progress: 90 });
       const exported = await exportedPdf.save();
@@ -487,6 +581,7 @@ export function App() {
             Export PDF
           </button>
           <input ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
+          <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
         </div>
       </header>
 
@@ -534,6 +629,16 @@ export function App() {
             <ToolButton icon={<Highlighter />} label="Add highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
             <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
             <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
+            <ToolButton
+              icon={<ImageIcon />}
+              label="Add image"
+              active={activeTool === "image"}
+              onClick={() => {
+                setActiveTool("image");
+                imageInput.current?.click();
+              }}
+              disabled={isBusy}
+            />
             <div className="tool-divider" />
             <ToolButton icon={<Undo2 />} label="Undo" onClick={undo} disabled={!canUndo} />
             <ToolButton icon={<Redo2 />} label="Redo" onClick={redo} disabled={!canRedo} />
@@ -594,6 +699,7 @@ export function App() {
                   value={selected.text}
                   onChange={(event) => updateMark(selected.id, { text: event.target.value })}
                   aria-label="Annotation content"
+                  disabled={selected.kind === "image"}
                 />
               </label>
               <label>
@@ -617,6 +723,32 @@ export function App() {
                   aria-label="Annotation text size"
                 />
               </label>
+              {selected.kind === "image" ? (
+                <>
+                  <label>
+                    Rotation
+                    <input
+                      type="range"
+                      min="-180"
+                      max="180"
+                      value={selected.rotation}
+                      onChange={(event) => updateMark(selected.id, { rotation: Number(event.target.value) })}
+                      aria-label="Image rotation"
+                    />
+                  </label>
+                  <label>
+                    Degrees
+                    <input
+                      type="number"
+                      min="-180"
+                      max="180"
+                      value={Math.round(selected.rotation)}
+                      onChange={(event) => updateMark(selected.id, { rotation: Number(event.target.value) })}
+                      aria-label="Image rotation degrees"
+                    />
+                  </label>
+                </>
+              ) : null}
               <div className="dimension-grid">
                 <label>
                   W
@@ -681,7 +813,14 @@ function DocumentPage({
   onCommitMarkChange: (beforeMark: Mark, afterMark: Mark) => void;
 }) {
   const pageRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ before: Mark; latest: Mark; startX: number; startY: number } | null>(null);
+  const dragRef = useRef<{
+    before: Mark;
+    latest: Mark;
+    startX: number;
+    startY: number;
+    mode: "move" | "resize";
+    corner?: "nw" | "ne" | "sw" | "se";
+  } | null>(null);
 
   function pagePoint(event: PointerEvent<HTMLDivElement>) {
     const bounds = pageRef.current?.getBoundingClientRect();
@@ -710,14 +849,17 @@ function DocumentPage({
             if (!activeMark) return;
             const dx = (event.clientX - drag.startX) / zoom;
             const dy = (event.clientY - drag.startY) / zoom;
-            const latest = clampMarkToPage(
-              {
-                ...activeMark,
-                x: drag.before.x + dx,
-                y: drag.before.y + dy,
-              },
-              [page]
-            );
+            const latest =
+              drag.mode === "resize" && drag.corner
+                ? resizeMarkFromCorner(drag.before, drag.corner, dx, dy, [page])
+                : clampMarkToPage(
+                    {
+                      ...activeMark,
+                      x: drag.before.x + dx,
+                      y: drag.before.y + dy,
+                    },
+                    [page]
+                  );
             dragRef.current = { ...drag, latest };
             onPreviewMark(activeMark.id, latest);
           }}
@@ -751,6 +893,7 @@ function DocumentPage({
             color: mark.color,
             fontSize: mark.size * zoom,
             backgroundColor: mark.kind === "highlight" ? hexToRgba(mark.color, 0.48) : undefined,
+            transform: mark.rotation ? `rotate(${mark.rotation}deg)` : undefined,
           }}
           onPointerDown={(event) => {
             event.stopPropagation();
@@ -760,10 +903,33 @@ function DocumentPage({
               latest: mark,
               startX: event.clientX,
               startY: event.clientY,
+              mode: "move",
             };
           }}
         >
-          {mark.kind === "highlight" ? "" : mark.text}
+          {mark.kind === "image" && mark.imageDataUrl ? <img className="image-mark-media" src={mark.imageDataUrl} alt={mark.imageName || "Image annotation"} /> : null}
+          {mark.kind !== "highlight" && mark.kind !== "image" ? mark.text : ""}
+          {mark.kind === "image" && selectedMark === mark.id
+            ? (["nw", "ne", "sw", "se"] as const).map((corner) => (
+                <span
+                  className={`resize-handle handle-${corner}`}
+                  key={corner}
+                  aria-hidden="true"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    onSelect(mark.id);
+                    dragRef.current = {
+                      before: mark,
+                      latest: mark,
+                      startX: event.clientX,
+                      startY: event.clientY,
+                      mode: "resize",
+                      corner,
+                    };
+                  }}
+                />
+              ))
+            : null}
         </button>
       ))}
     </div>
@@ -823,6 +989,98 @@ function colorToRgb(hex: string) {
   return rgb(red, green, blue);
 }
 
+function dataUrlToBytes(dataUrl: string) {
+  const base64 = dataUrl.split(",")[1];
+  if (!base64) throw new Error("Invalid image data.");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function prepareImageAnnotation(file: File) {
+  const supportedTypes = ["image/png", "image/jpeg", "image/svg+xml", "image/webp"];
+  if (!supportedTypes.includes(file.type)) {
+    throw new Error("Unsupported image type.");
+  }
+
+  const originalDataUrl = await readFileAsDataUrl(file);
+  const dimensions = await getImageDimensions(originalDataUrl);
+
+  if (file.type === "image/png") {
+    return {
+      dataUrl: originalDataUrl,
+      mimeType: "image/png" as const,
+      name: file.name,
+      width: dimensions.width,
+      height: dimensions.height,
+    };
+  }
+
+  if (file.type === "image/jpeg") {
+    return {
+      dataUrl: originalDataUrl,
+      mimeType: "image/jpeg" as const,
+      name: file.name,
+      width: dimensions.width,
+      height: dimensions.height,
+    };
+  }
+
+  const pngDataUrl = await rasterizeImageToPng(originalDataUrl, dimensions.width, dimensions.height);
+  return {
+    dataUrl: pngDataUrl,
+    mimeType: "image/png" as const,
+    name: file.name,
+    width: dimensions.width,
+    height: dimensions.height,
+  };
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new Error("Could not read image."));
+    };
+    reader.onerror = () => reject(new Error("Could not read image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function getImageDimensions(dataUrl: string) {
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth || image.width, height: image.naturalHeight || image.height });
+    image.onerror = () => reject(new Error("Could not load image."));
+    image.src = dataUrl;
+  });
+}
+
+function rasterizeImageToPng(dataUrl: string, width: number, height: number) {
+  return new Promise<string>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("Could not prepare image."));
+        return;
+      }
+      context.clearRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = () => reject(new Error("Could not prepare image."));
+    image.src = dataUrl;
+  });
+}
+
 function hexToRgba(hex: string, alpha: number) {
   const clean = hex.replace("#", "");
   const bigint = Number.parseInt(clean, 16);
@@ -839,14 +1097,39 @@ function clamp(value: number, min: number, max: number) {
 function clampMarkToPage(mark: Mark, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
   const page = pages.find((item) => item.pageNumber === mark.page);
   if (!page) return mark;
+  const width = Math.max(1, mark.width);
+  const height = Math.max(1, mark.height);
 
   return {
     ...mark,
-    width: Math.max(1, mark.width),
-    height: Math.max(1, mark.height),
-    x: clamp(mark.x, 0, Math.max(0, page.width - mark.width)),
-    y: clamp(mark.y, 0, Math.max(0, page.height - mark.height)),
+    width,
+    height,
+    rotation: normalizeRotation(mark.rotation),
+    x: clamp(mark.x, 0, Math.max(0, page.width - width)),
+    y: clamp(mark.y, 0, Math.max(0, page.height - height)),
   };
+}
+
+function resizeMarkFromCorner(mark: Mark, corner: "nw" | "ne" | "sw" | "se", dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
+  const aspectRatio = mark.width / mark.height || 1;
+  const horizontalDelta = corner.includes("w") ? -dx : dx;
+  const verticalDelta = corner.includes("n") ? -dy : dy;
+  const dominantDelta = Math.abs(horizontalDelta) > Math.abs(verticalDelta) ? horizontalDelta : verticalDelta * aspectRatio;
+  const nextWidth = Math.max(24, mark.width + dominantDelta);
+  const nextHeight = nextWidth / aspectRatio;
+  const nextX = corner.includes("w") ? mark.x + mark.width - nextWidth : mark.x;
+  const nextY = corner.includes("n") ? mark.y + mark.height - nextHeight : mark.y;
+
+  return clampMarkToPage(
+    {
+      ...mark,
+      x: nextX,
+      y: nextY,
+      width: nextWidth,
+      height: nextHeight,
+    },
+    pages
+  );
 }
 
 function areMarksEqual(left: Mark[], right: Mark[]) {
@@ -865,12 +1148,19 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       mark.height === other.height &&
       mark.text === other.text &&
       mark.color === other.color &&
-      mark.size === other.size
+      mark.size === other.size &&
+      mark.rotation === other.rotation &&
+      mark.imageDataUrl === other.imageDataUrl &&
+      mark.imageMimeType === other.imageMimeType &&
+      mark.imageName === other.imageName &&
+      mark.imageNaturalWidth === other.imageNaturalWidth &&
+      mark.imageNaturalHeight === other.imageNaturalHeight
     );
   });
 }
 
 function getMarkLabel(mark: Mark) {
+  if (mark.kind === "image") return `Image annotation: ${mark.imageName || mark.text || "Image"}`;
   if (mark.kind === "highlight") return "Highlight annotation";
   if (mark.kind === "signature") return `Signature annotation: ${mark.text}`;
   if (mark.kind === "stamp") return `Stamp annotation: ${mark.text}`;
@@ -898,4 +1188,26 @@ function getPdfErrorMessage(error: unknown, phase: "upload" | "render" | "export
   }
 
   return "The PDF could not be opened. Please choose a valid, unencrypted PDF file.";
+}
+
+function getImageErrorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.toLowerCase().includes("unsupported")) {
+    return "Please choose a PNG, JPG, SVG, or WebP image.";
+  }
+  return "The image could not be added. Please choose a valid PNG, JPG, SVG, or WebP file.";
+}
+
+function normalizeRotation(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return clamp(value, -180, 180);
+}
+
+function degreesToRadians(value: number) {
+  return (value * Math.PI) / 180;
+}
+
+function isEditableElement(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.matches("input, textarea, select, [contenteditable='true']");
 }
