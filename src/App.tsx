@@ -21,7 +21,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { degrees, PDFDocument, rgb, StandardFonts, type PDFFont } from "pdf-lib";
+import { degrees, PDFDocument, rgb, StandardFonts, type PDFFont, type PDFPage } from "pdf-lib";
 import {
   GlobalWorkerOptions,
   getDocument,
@@ -50,6 +50,20 @@ import {
   type MarkupRect,
   type TextMarkupKind,
 } from "./textMarkup";
+import {
+  createDefaultTextBoxStyle,
+  getCssFontFamily,
+  getPresetTextStyle,
+  getStandardFontName,
+  measureTextWidth,
+  textBoxAlignments,
+  textBoxFontFamilies,
+  textBoxPresets,
+  wrapTextForBox,
+  type TextBoxFontFamily,
+  type TextBoxPreset,
+  type TextBoxStyle,
+} from "./textBoxes";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -105,6 +119,7 @@ type Mark = {
   lockAspectRatio?: boolean;
   markupRects?: MarkupRect[];
   comment?: CommentData;
+  textStyle?: TextBoxStyle;
   strokePoints?: StrokePoint[];
   strokeOpacity?: number;
 };
@@ -196,6 +211,7 @@ export function App() {
   const [editingReply, setEditingReply] = useState<{ id: string; body: string } | null>(null);
   const [commentFilter, setCommentFilter] = useState<CommentStatusFilter>("open");
   const [showAllComments, setShowAllComments] = useState(false);
+  const [editingText, setEditingText] = useState<{ id: string; before: Mark; draft: string; isNew: boolean } | null>(null);
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
   const [isDragging, setIsDragging] = useState(false);
@@ -227,6 +243,7 @@ export function App() {
       if (!isModifierPressed || isBusy) return;
 
       const key = event.key.toLowerCase();
+      if (isEditableElement(event.target) && (key === "z" || key === "y" || key === "c" || key === "v")) return;
       const isUndo = key === "z" && !event.shiftKey;
       const isRedo = (key === "z" && event.shiftKey) || key === "y";
       const isCopy = key === "c" && !event.shiftKey && !isEditableElement(event.target);
@@ -494,6 +511,7 @@ export function App() {
 
   function addMark(pageNumber: number, x: number, y: number) {
     if (activeTool === "select") return;
+    if (activeTool === "text") return;
     if (activeTool === "image") {
       imageInput.current?.click();
       return;
@@ -529,26 +547,51 @@ export function App() {
 
     const mark: Mark = {
       id: crypto.randomUUID(),
-      kind: activeTool === "text" ? "text" : activeTool,
+      kind: activeTool,
       page: pageNumber,
       x,
       y,
       width: activeTool === "highlight" ? 220 : activeTool === "signature" ? 190 : 124,
-      height: activeTool === "text" ? 34 : activeTool === "highlight" ? 28 : 42,
+      height: activeTool === "highlight" ? 28 : 42,
       text:
-        activeTool === "text"
-          ? "New text"
-          : activeTool === "signature"
+        activeTool === "signature"
             ? "Signature"
             : activeTool === "stamp"
               ? "APPROVED"
               : "",
       color: activeTool === "highlight" ? "#facc15" : activeTool === "stamp" ? BRAND_RED : "#111827",
-      size: activeTool === "text" ? 18 : 16,
+      size: 16,
       rotation: 0,
     };
 
     commitMarks([...marks, mark], mark.id);
+    setActiveTool("select");
+  }
+
+  function addTextBox(pageNumber: number, x: number, y: number, width?: number, height?: number) {
+    if (activeTool !== "text") return;
+    const page = pages.find((item) => item.pageNumber === pageNumber) ?? pages[0];
+    const boxWidth = Math.max(96, width ?? 190);
+    const boxHeight = Math.max(42, height ?? 64);
+    const mark: Mark = {
+      id: crypto.randomUUID(),
+      kind: "text",
+      page: pageNumber,
+      x: width === undefined ? x : Math.min(x, page.width - boxWidth),
+      y: height === undefined ? y : Math.min(y, page.height - boxHeight),
+      width: boxWidth,
+      height: boxHeight,
+      text: "",
+      color: "#111827",
+      size: 12,
+      rotation: 0,
+      opacity: 1,
+      textStyle: createDefaultTextBoxStyle(),
+    };
+    const clamped = clampMarkToPage(mark, pages);
+
+    commitMarks([...marks, clamped], clamped.id);
+    setEditingText({ id: clamped.id, before: clamped, draft: "", isNew: true });
     setActiveTool("select");
   }
 
@@ -663,6 +706,66 @@ export function App() {
     if (!copiedMark) return;
     const pasted = duplicateMark(copiedMark, currentPage);
     commitMarks([...marks, clampMarkToPage(pasted, pages)], pasted.id);
+  }
+
+  function startTextEdit(mark: Mark) {
+    if (mark.kind !== "text") return;
+    setSelectedMark(mark.id);
+    setEditingText({ id: mark.id, before: mark, draft: mark.text, isNew: false });
+  }
+
+  function saveTextEdit() {
+    if (!editingText) return;
+    const current = marks.find((mark) => mark.id === editingText.id);
+    if (!current || current.kind !== "text") {
+      setEditingText(null);
+      return;
+    }
+
+    const draft = editingText.draft;
+    if (!draft.trim()) {
+      commitMarks(marks.filter((mark) => mark.id !== editingText.id), null);
+      setEditingText(null);
+      return;
+    }
+
+    const nextMark = { ...current, text: draft };
+    if (areMarksEqual([editingText.before], [nextMark])) {
+      setEditingText(null);
+      return;
+    }
+
+    commitMarkChange(editingText.before, nextMark);
+    setEditingText(null);
+  }
+
+  function cancelTextEdit() {
+    if (!editingText) return;
+    if (editingText.isNew) {
+      commitMarks(marks.filter((mark) => mark.id !== editingText.id), null);
+    } else {
+      const nextMarks = marks.map((mark) => (mark.id === editingText.id ? editingText.before : mark));
+      commitMarks(nextMarks, editingText.before.id);
+    }
+    setEditingText(null);
+  }
+
+  function updateTextStyle(id: string, patch: Partial<TextBoxStyle>) {
+    const mark = marks.find((item) => item.id === id);
+    if (!mark) return;
+    updateMark(id, { textStyle: { ...createDefaultTextBoxStyle(mark.textStyle), ...patch } });
+  }
+
+  function applyTextPreset(preset: string) {
+    if (!selected || selected.kind !== "text") return;
+    const presetPatch = getPresetTextStyle(preset as TextBoxPreset);
+    const { text, color, size, ...stylePatch } = presetPatch;
+    updateMark(selected.id, {
+      text: text ?? selected.text,
+      color: color ?? selected.color,
+      size: size ?? selected.size,
+      textStyle: { ...createDefaultTextBoxStyle(selected.textStyle), ...stylePatch },
+    });
   }
 
   function saveCommentBody() {
@@ -793,6 +896,15 @@ export function App() {
       const sourcePdf = pdfBytes ? await PDFDocument.load(pdfBytes) : null;
       const helvetica = await exportedPdf.embedFont(StandardFonts.Helvetica);
       const helveticaBold = await exportedPdf.embedFont(StandardFonts.HelveticaBold);
+      const textFonts = new Map<string, PDFFont>();
+      async function getTextBoxFont(style: TextBoxStyle) {
+        const fontName = getStandardFontName(style);
+        const existing = textFonts.get(fontName);
+        if (existing) return existing;
+        const embedded = await exportedPdf.embedFont(fontName);
+        textFonts.set(fontName, embedded);
+        return embedded;
+      }
 
       while (exportedPdf.getPageCount() < pages.length) {
         const pageView = pages[exportedPdf.getPageCount()];
@@ -816,6 +928,23 @@ export function App() {
         const markWidth = (mark.width / sourcePage.width) * width;
         const markHeight = (mark.height / sourcePage.height) * height;
         const markSize = Math.max(8, (mark.size / sourcePage.height) * height * 1.2);
+
+        if (mark.kind === "text") {
+          const textStyle = getTextBoxStyle(mark);
+          const textFont = await getTextBoxFont(textStyle);
+          drawTextBoxToPdfPage({
+            page,
+            mark,
+            font: textFont,
+            x,
+            y,
+            width: markWidth,
+            height: markHeight,
+            fontSize: markSize,
+            scale: height / sourcePage.height,
+          });
+          continue;
+        }
 
         if (mark.kind === "comment" && mark.comment) {
           const markerSize = Math.max(14, (24 / sourcePage.height) * height);
@@ -1122,11 +1251,17 @@ export function App() {
                   pendingSignature={pendingSignature}
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
+                  onAddTextBox={addTextBox}
                   onAddStroke={addStroke}
                   onAddTextMarkup={addTextMarkup}
                   onPlaceSignature={placeSignature}
                   onPreviewMark={previewMark}
                   onCommitMarkChange={commitMarkChange}
+                  editingText={editingText}
+                  onStartTextEdit={startTextEdit}
+                  onTextDraftChange={(draft) => setEditingText((existing) => (existing ? { ...existing, draft } : existing))}
+                  onSaveTextEdit={saveTextEdit}
+                  onCancelTextEdit={cancelTextEdit}
                 />
               ))}
           </div>
@@ -1323,6 +1458,241 @@ export function App() {
               <button className="button ghost full-width" onClick={removeSelectedMark} title="Delete comment" aria-label="Delete comment">
                 Delete comment
               </button>
+            </div>
+          ) : selected?.kind === "text" ? (
+            <div className="control-stack text-box-controls">
+              <button className="button ghost full-width" onClick={() => startTextEdit(selected)} title="Edit text box content" aria-label="Edit text box content">
+                Edit text
+              </button>
+              <label>
+                Preset
+                <select value="" onChange={(event) => applyTextPreset(event.currentTarget.value)} aria-label="Text box preset">
+                  <option value="" disabled>
+                    Choose preset
+                  </option>
+                  {textBoxPresets.map((preset) => (
+                    <option key={preset.value} value={preset.value}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Font family
+                <select
+                  value={getTextBoxStyle(selected).fontFamily}
+                  onChange={(event) => updateTextStyle(selected.id, { fontFamily: event.currentTarget.value as TextBoxFontFamily })}
+                  aria-label="Text box font family"
+                >
+                  {textBoxFontFamilies.map((font) => (
+                    <option key={font} value={font}>
+                      {font}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Font size
+                <input
+                  type="number"
+                  min="6"
+                  max="96"
+                  value={selected.size}
+                  onChange={(event) => updateMark(selected.id, { size: clamp(Number(event.currentTarget.value), 6, 96) })}
+                  aria-label="Text box font size"
+                />
+              </label>
+              <label>
+                Text colour
+                <input type="color" value={selected.color} onChange={(event) => updateMark(selected.id, { color: event.currentTarget.value })} aria-label="Text box text colour" />
+              </label>
+              <label>
+                Text colour hex
+                <input
+                  type="text"
+                  value={selected.color}
+                  onChange={(event) => {
+                    const color = normalizeHexColor(event.currentTarget.value);
+                    if (color) updateMark(selected.id, { color });
+                  }}
+                  aria-label="Text box text colour hex"
+                />
+              </label>
+              <div className="toggle-grid" role="group" aria-label="Text style toggles">
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={getTextBoxStyle(selected).bold}
+                    onChange={(event) => updateTextStyle(selected.id, { bold: event.currentTarget.checked })}
+                    aria-label="Bold text box text"
+                  />
+                  Bold
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={getTextBoxStyle(selected).italic}
+                    onChange={(event) => updateTextStyle(selected.id, { italic: event.currentTarget.checked })}
+                    aria-label="Italic text box text"
+                  />
+                  Italic
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={getTextBoxStyle(selected).underline}
+                    onChange={(event) => updateTextStyle(selected.id, { underline: event.currentTarget.checked })}
+                    aria-label="Underline text box text"
+                  />
+                  Underline
+                </label>
+              </div>
+              <div className="segmented" role="group" aria-label="Text alignment">
+                {textBoxAlignments.map((align) => (
+                  <button
+                    className={getTextBoxStyle(selected).align === align ? "active" : ""}
+                    key={align}
+                    onClick={() => updateTextStyle(selected.id, { align })}
+                    title={`Align text ${align}`}
+                    aria-label={`Align text ${align}`}
+                    aria-pressed={getTextBoxStyle(selected).align === align}
+                  >
+                    {align}
+                  </button>
+                ))}
+              </div>
+              <div className="dimension-grid">
+                <label>
+                  Line spacing
+                  <input
+                    type="number"
+                    min="0.8"
+                    max="3"
+                    step="0.05"
+                    value={getTextBoxStyle(selected).lineHeight}
+                    onChange={(event) => updateTextStyle(selected.id, { lineHeight: clamp(Number(event.currentTarget.value), 0.8, 3) })}
+                    aria-label="Text box line spacing"
+                  />
+                </label>
+                <label>
+                  Letter spacing
+                  <input
+                    type="number"
+                    min="-2"
+                    max="12"
+                    step="0.25"
+                    value={getTextBoxStyle(selected).letterSpacing}
+                    onChange={(event) => updateTextStyle(selected.id, { letterSpacing: clamp(Number(event.currentTarget.value), -2, 12) })}
+                    aria-label="Text box letter spacing"
+                  />
+                </label>
+              </div>
+              <label>
+                Opacity
+                <input
+                  type="number"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={selected.opacity ?? 1}
+                  onChange={(event) => updateMark(selected.id, { opacity: clamp(Number(event.currentTarget.value), 0.1, 1) })}
+                  aria-label="Text box opacity"
+                />
+              </label>
+              <label>
+                Background colour
+                <input
+                  type="color"
+                  value={getTextBoxStyle(selected).backgroundColor}
+                  onChange={(event) => updateTextStyle(selected.id, { backgroundColor: event.currentTarget.value })}
+                  aria-label="Text box background colour"
+                />
+              </label>
+              <label>
+                Background opacity
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={getTextBoxStyle(selected).backgroundOpacity}
+                  onChange={(event) => updateTextStyle(selected.id, { backgroundOpacity: clamp(Number(event.currentTarget.value), 0, 1) })}
+                  aria-label="Text box background opacity"
+                />
+              </label>
+              <label>
+                Border colour
+                <input
+                  type="color"
+                  value={getTextBoxStyle(selected).borderColor}
+                  onChange={(event) => updateTextStyle(selected.id, { borderColor: event.currentTarget.value })}
+                  aria-label="Text box border colour"
+                />
+              </label>
+              <div className="dimension-grid">
+                <label>
+                  Border width
+                  <input
+                    type="number"
+                    min="0"
+                    max="12"
+                    step="0.5"
+                    value={getTextBoxStyle(selected).borderWidth}
+                    onChange={(event) => updateTextStyle(selected.id, { borderWidth: clamp(Number(event.currentTarget.value), 0, 12) })}
+                    aria-label="Text box border width"
+                  />
+                </label>
+                <label>
+                  Padding
+                  <input
+                    type="number"
+                    min="0"
+                    max="48"
+                    value={getTextBoxStyle(selected).padding}
+                    onChange={(event) => updateTextStyle(selected.id, { padding: clamp(Number(event.currentTarget.value), 0, 48) })}
+                    aria-label="Text box internal padding"
+                  />
+                </label>
+              </div>
+              <label>
+                Rotation
+                <input
+                  type="number"
+                  min="-180"
+                  max="180"
+                  value={Math.round(selected.rotation)}
+                  onChange={(event) => updateMark(selected.id, { rotation: Number(event.currentTarget.value) })}
+                  aria-label="Text box rotation degrees"
+                />
+              </label>
+              <div className="dimension-grid">
+                <label>
+                  W
+                  <input
+                    type="number"
+                    value={Math.round(selected.width)}
+                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "width", Number(event.currentTarget.value)))}
+                    aria-label="Text box width"
+                  />
+                </label>
+                <label>
+                  H
+                  <input
+                    type="number"
+                    value={Math.round(selected.height)}
+                    onChange={(event) => updateMark(selected.id, getDimensionPatch(selected, "height", Number(event.currentTarget.value)))}
+                    aria-label="Text box height"
+                  />
+                </label>
+              </div>
+              <div className="inspector-actions">
+                <button className="button ghost" onClick={duplicateSelectedMark} title="Duplicate text box" aria-label="Duplicate text box">
+                  Duplicate
+                </button>
+                <button className="button ghost" onClick={removeSelectedMark} title="Delete text box" aria-label="Delete text box">
+                  Delete
+                </button>
+              </div>
             </div>
           ) : selected ? (
             <div className="control-stack">
@@ -1631,11 +2001,17 @@ function DocumentPage({
   pendingSignature,
   onSelect,
   onAddMark,
+  onAddTextBox,
   onAddStroke,
   onAddTextMarkup,
   onPlaceSignature,
   onPreviewMark,
   onCommitMarkChange,
+  editingText,
+  onStartTextEdit,
+  onTextDraftChange,
+  onSaveTextEdit,
+  onCancelTextEdit,
 }: {
   page: PageView;
   marks: Mark[];
@@ -1648,13 +2024,20 @@ function DocumentPage({
   pendingSignature: PreparedImage | null;
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
+  onAddTextBox: (page: number, x: number, y: number, width?: number, height?: number) => void;
   onAddStroke: (page: number, points: StrokePoint[]) => void;
   onAddTextMarkup: (page: number, rects: MarkupRect[]) => void;
   onPlaceSignature: (page: number, x: number, y: number, width?: number, height?: number) => void;
   onPreviewMark: (id: string, patch: Partial<Mark>) => void;
   onCommitMarkChange: (beforeMark: Mark, afterMark: Mark) => void;
+  editingText: { id: string; before: Mark; draft: string; isNew: boolean } | null;
+  onStartTextEdit: (mark: Mark) => void;
+  onTextDraftChange: (draft: string) => void;
+  onSaveTextEdit: () => void;
+  onCancelTextEdit: () => void;
 }) {
   const pageRef = useRef<HTMLDivElement>(null);
+  const textEditorRef = useRef<HTMLTextAreaElement>(null);
   const dragRef = useRef<{
     before: Mark;
     latest: Mark;
@@ -1666,7 +2049,17 @@ function DocumentPage({
   const [draftStroke, setDraftStroke] = useState<StrokePoint[]>([]);
   const [draftSignature, setDraftSignature] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
   const [draftTextSelection, setDraftTextSelection] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
+  const [draftTextBox, setDraftTextBox] = useState<{ start: StrokePoint; current: StrokePoint } | null>(null);
   const activeDraftStroke = Array.isArray(draftStroke) ? draftStroke : [];
+
+  useEffect(() => {
+    if (!editingText) return;
+    window.setTimeout(() => {
+      const editor = textEditorRef.current;
+      editor?.focus();
+      editor?.setSelectionRange(editor.value.length, editor.value.length);
+    }, 0);
+  }, [editingText?.id]);
 
   function pagePoint(event: PointerEvent<HTMLDivElement>) {
     const bounds = pageRef.current?.getBoundingClientRect();
@@ -1734,6 +2127,12 @@ function DocumentPage({
           setDraftStroke([point]);
           return;
         }
+        if (activeTool === "text") {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          onSelect(null);
+          setDraftTextBox({ start: point, current: point });
+          return;
+        }
         if (activeTool === "pngSignature") {
           if (!pendingSignature) {
             onAddMark(page.pageNumber, point.x, point.y);
@@ -1758,6 +2157,10 @@ function DocumentPage({
             }
             if (draftTextSelection) {
               setDraftTextSelection((existing) => (existing ? { ...existing, current: pagePoint(event) } : existing));
+              return;
+            }
+            if (draftTextBox) {
+              setDraftTextBox((existing) => (existing ? { ...existing, current: pagePoint(event) } : existing));
               return;
             }
             const drag = dragRef.current;
@@ -1792,6 +2195,13 @@ function DocumentPage({
           window.setTimeout(createMarkupFromSelection, 0);
           return;
         }
+        if (draftTextBox) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+          const placement = getDraftTextBoxPlacement(draftTextBox.start, pagePoint(event));
+          setDraftTextBox(null);
+          onAddTextBox(page.pageNumber, placement.x, placement.y, placement.width, placement.height);
+          return;
+        }
         if (draftSignature && pendingSignature) {
           event.currentTarget.releasePointerCapture(event.pointerId);
           const placement = getSignaturePlacement(draftSignature.start, pagePoint(event), pendingSignature);
@@ -1808,6 +2218,7 @@ function DocumentPage({
       onPointerLeave={() => {
         if (activeDraftStroke.length > 0) return;
         if (draftTextSelection) return;
+        if (draftTextBox) return;
         const drag = dragRef.current;
         dragRef.current = null;
         if (drag && !areMarksEqual([drag.before], [drag.latest])) {
@@ -1865,10 +2276,17 @@ function DocumentPage({
           <img src={pendingSignature.dataUrl} alt="" />
         </div>
       ) : null}
+      {draftTextBox ? (
+        <div className="text-box-placement-preview" aria-hidden="true" style={getDraftSelectionStyle(draftTextBox.start, draftTextBox.current, zoom)} />
+      ) : null}
       {marks.map((mark) => (
-        <button
-          className={`mark mark-${mark.kind} ${selectedMark === mark.id ? "selected" : ""} ${mark.kind === "comment" && mark.comment?.resolved ? "resolved" : ""}`}
+        <div
+          className={`mark mark-${mark.kind} ${selectedMark === mark.id ? "selected" : ""} ${editingText?.id === mark.id ? "editing" : ""} ${
+            mark.kind === "comment" && mark.comment?.resolved ? "resolved" : ""
+          } ${mark.kind === "text" && doesTextOverflow(mark) ? "overflowing" : ""}`}
           key={mark.id}
+          role="button"
+          tabIndex={0}
           title={getMarkLabel(mark)}
           aria-label={getMarkLabel(mark)}
           style={{
@@ -1880,8 +2298,10 @@ function DocumentPage({
             fontSize: mark.kind === "comment" ? 16 : mark.size * zoom,
             backgroundColor: mark.kind === "highlight" ? hexToRgba(mark.color, 0.48) : undefined,
             transform: mark.rotation ? `rotate(${mark.rotation}deg)` : undefined,
+            ...getTextBoxContainerStyle(mark, zoom),
           }}
           onPointerDown={(event) => {
+            if (editingText?.id === mark.id) return;
             event.stopPropagation();
             onSelect(mark.id);
             dragRef.current = {
@@ -1892,7 +2312,52 @@ function DocumentPage({
               mode: "move",
             };
           }}
+          onDoubleClick={(event) => {
+            if (mark.kind !== "text") return;
+            event.stopPropagation();
+            onStartTextEdit(mark);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && mark.kind === "text" && editingText?.id !== mark.id) {
+              event.preventDefault();
+              onStartTextEdit(mark);
+            }
+          }}
         >
+          {mark.kind === "text" ? (
+            editingText?.id === mark.id ? (
+              <textarea
+                ref={textEditorRef}
+                className="text-box-editor"
+                value={editingText.draft}
+                onChange={(event) => onTextDraftChange(event.currentTarget.value)}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => event.stopPropagation()}
+                onBlur={(event) => {
+                  if (event.currentTarget.dataset.canceling === "true") return;
+                  onSaveTextEdit();
+                }}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    onSaveTextEdit();
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.currentTarget.dataset.canceling = "true";
+                    onCancelTextEdit();
+                  }
+                }}
+                aria-label="Edit text box content"
+                style={getTextBoxTextStyle(mark, zoom)}
+              />
+            ) : (
+              <div className="text-box-preview" style={getTextBoxTextStyle(mark, zoom)}>
+                {mark.text || ""}
+              </div>
+            )
+          ) : null}
           {isTextMarkupKind(mark.kind) && mark.markupRects ? (
             <svg className="markup-mark-svg" viewBox={`0 0 ${mark.width} ${mark.height}`} aria-hidden="true">
               {mark.markupRects.map((rect, index) => {
@@ -1956,10 +2421,11 @@ function DocumentPage({
           mark.kind !== "pngSignature" &&
           mark.kind !== "stroke" &&
           mark.kind !== "comment" &&
+          mark.kind !== "text" &&
           !isTextMarkupKind(mark.kind)
             ? mark.text
             : ""}
-          {(mark.kind === "image" || mark.kind === "pngSignature") && selectedMark === mark.id
+          {((mark.kind === "image" || mark.kind === "pngSignature" || mark.kind === "text") && selectedMark === mark.id && editingText?.id !== mark.id)
             ? (["nw", "ne", "sw", "se"] as const).map((corner) => (
                 <span
                   className={`resize-handle handle-${corner}`}
@@ -1980,7 +2446,7 @@ function DocumentPage({
                 />
               ))
             : null}
-        </button>
+        </div>
       ))}
     </div>
   );
@@ -2085,6 +2551,147 @@ function appendCommentsSummary(pdf: PDFDocument, font: PDFFont, boldFont: PDFFon
       for (const line of replyLines) drawLine(line, 9);
     }
     y -= 10;
+  }
+}
+
+function drawTextBoxToPdfPage({
+  page,
+  mark,
+  font,
+  x,
+  y,
+  width,
+  height,
+  fontSize,
+  scale,
+}: {
+  page: PDFPage;
+  mark: Mark;
+  font: PDFFont;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  scale: number;
+}) {
+  const style = getTextBoxStyle(mark);
+  const rotate = degrees(mark.rotation);
+  const padding = Math.max(0, style.padding * scale);
+  const borderWidth = Math.max(0, style.borderWidth * scale);
+  const letterSpacing = style.letterSpacing * scale;
+  const maxTextWidth = Math.max(1, width - padding * 2 - borderWidth * 2);
+  const lines = wrapTextForBox(mark.text, maxTextWidth, fontSize, font, letterSpacing);
+  const lineAdvance = fontSize * style.lineHeight;
+
+  if (style.backgroundOpacity > 0) {
+    page.drawRectangle({
+      x,
+      y,
+      width,
+      height,
+      color: colorToRgb(style.backgroundColor),
+      opacity: style.backgroundOpacity,
+      rotate,
+    });
+  }
+
+  if (borderWidth > 0) {
+    page.drawRectangle({
+      x,
+      y,
+      width,
+      height,
+      borderColor: colorToRgb(style.borderColor),
+      borderWidth,
+      rotate,
+    });
+  }
+
+  const firstBaseline = y + height - padding - fontSize;
+  const visibleLineCount = Math.max(1, Math.floor((height - padding * 2) / lineAdvance) + 1);
+
+  for (const [index, line] of lines.slice(0, visibleLineCount).entries()) {
+    const lineWidth = measureTextWidth(line, fontSize, font, letterSpacing);
+    const alignOffset = style.align === "center" ? (maxTextWidth - lineWidth) / 2 : style.align === "right" ? maxTextWidth - lineWidth : 0;
+    const lineX = x + padding + Math.max(0, alignOffset);
+    const lineY = firstBaseline - index * lineAdvance;
+
+    drawPdfTextLine(page, line || " ", {
+      x: lineX,
+      y: lineY,
+      size: fontSize,
+      font,
+      color: mark.color,
+      opacity: mark.opacity ?? 1,
+      rotate,
+      letterSpacing,
+    });
+
+    if (style.underline && line) {
+      const underlineOffset = -fontSize * 0.16;
+      const underlineStart = rotatePdfPoint(lineX, lineY + underlineOffset, lineX, lineY, mark.rotation);
+      const underlineEnd = rotatePdfPoint(lineX + lineWidth, lineY + underlineOffset, lineX, lineY, mark.rotation);
+      page.drawLine({
+        start: underlineStart,
+        end: underlineEnd,
+        thickness: Math.max(0.4, fontSize * 0.06),
+        color: colorToRgb(mark.color),
+        opacity: mark.opacity ?? 1,
+      });
+    }
+  }
+}
+
+function rotatePdfPoint(x: number, y: number, originX: number, originY: number, rotation: number) {
+  const radians = degreesToRadians(rotation);
+  const dx = x - originX;
+  const dy = y - originY;
+  return {
+    x: originX + dx * Math.cos(radians) - dy * Math.sin(radians),
+    y: originY + dx * Math.sin(radians) + dy * Math.cos(radians),
+  };
+}
+
+function drawPdfTextLine(
+  page: PDFPage,
+  text: string,
+  options: {
+    x: number;
+    y: number;
+    size: number;
+    font: PDFFont;
+    color: string;
+    opacity: number;
+    rotate: ReturnType<typeof degrees>;
+    letterSpacing: number;
+  }
+) {
+  if (Math.abs(options.letterSpacing) < 0.01 || text.length <= 1) {
+    page.drawText(text, {
+      x: options.x,
+      y: options.y,
+      size: options.size,
+      font: options.font,
+      color: colorToRgb(options.color),
+      opacity: options.opacity,
+      rotate: options.rotate,
+    });
+    return;
+  }
+
+  let cursorX = options.x;
+  for (const char of text) {
+    page.drawText(char, {
+      x: cursorX,
+      y: options.y,
+      size: options.size,
+      font: options.font,
+      color: colorToRgb(options.color),
+      opacity: options.opacity,
+      rotate: options.rotate,
+    });
+    cursorX += options.font.widthOfTextAtSize(char, options.size) + options.letterSpacing;
   }
 }
 
@@ -2352,6 +2959,69 @@ function getDraftSelectionStyle(start: StrokePoint, current: StrokePoint, zoom: 
   };
 }
 
+function getDraftTextBoxPlacement(start: StrokePoint, current: StrokePoint) {
+  const width = Math.abs(current.x - start.x);
+  const height = Math.abs(current.y - start.y);
+  if (width < 8 && height < 8) {
+    return {
+      x: start.x,
+      y: start.y,
+      width: undefined,
+      height: undefined,
+    };
+  }
+
+  return {
+    x: Math.min(start.x, current.x),
+    y: Math.min(start.y, current.y),
+    width,
+    height,
+  };
+}
+
+function getTextBoxStyle(mark: Mark) {
+  return createDefaultTextBoxStyle(mark.textStyle);
+}
+
+function getTextBoxContainerStyle(mark: Mark, zoom: number) {
+  if (mark.kind !== "text") return {};
+  const style = getTextBoxStyle(mark);
+  return {
+    borderColor: style.borderWidth > 0 ? style.borderColor : undefined,
+    borderWidth: Math.max(0, style.borderWidth * zoom),
+    backgroundColor: style.backgroundOpacity > 0 ? hexToRgba(style.backgroundColor, style.backgroundOpacity) : "transparent",
+    opacity: mark.opacity ?? 1,
+  };
+}
+
+function getTextBoxTextStyle(mark: Mark, zoom: number) {
+  const style = getTextBoxStyle(mark);
+  return {
+    padding: style.padding * zoom,
+    fontFamily: getCssFontFamily(style.fontFamily),
+    fontSize: mark.size * zoom,
+    fontWeight: style.bold ? 700 : 400,
+    fontStyle: style.italic ? "italic" : "normal",
+    textDecoration: style.underline ? "underline" : "none",
+    textAlign: style.align,
+    lineHeight: style.lineHeight,
+    letterSpacing: style.letterSpacing * zoom,
+    color: mark.color,
+  };
+}
+
+function doesTextOverflow(mark: Mark) {
+  if (mark.kind !== "text") return false;
+  const style = getTextBoxStyle(mark);
+  const usableHeight = Math.max(1, mark.height - style.padding * 2);
+  const roughLineHeight = mark.size * style.lineHeight;
+  const roughCharsPerLine = Math.max(1, Math.floor((mark.width - style.padding * 2) / Math.max(1, mark.size * 0.52 + style.letterSpacing)));
+  const estimatedLines = mark.text
+    .split(/\r?\n/)
+    .reduce((count, line) => count + Math.max(1, Math.ceil(line.length / roughCharsPerLine)), 0);
+  return estimatedLines * roughLineHeight > usableHeight + 1;
+}
+
 function normalizeHexColor(value: string) {
   const trimmed = value.trim();
   const prefixed = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
@@ -2376,6 +3046,26 @@ function clampMarkToPage(mark: Mark, pages: Pick<PageView, "pageNumber" | "width
 }
 
 function resizeMarkFromCorner(mark: Mark, corner: "nw" | "ne" | "sw" | "se", dx: number, dy: number, pages: Pick<PageView, "pageNumber" | "width" | "height">[]) {
+  if (mark.kind === "text" || mark.kind === "image" || (mark.kind === "pngSignature" && mark.lockAspectRatio === false)) {
+    const minWidth = mark.kind === "text" ? 64 : 24;
+    const minHeight = mark.kind === "text" ? 32 : 12;
+    const nextWidth = Math.max(minWidth, mark.width + (corner.includes("w") ? -dx : dx));
+    const nextHeight = Math.max(minHeight, mark.height + (corner.includes("n") ? -dy : dy));
+    const nextX = corner.includes("w") ? mark.x + mark.width - nextWidth : mark.x;
+    const nextY = corner.includes("n") ? mark.y + mark.height - nextHeight : mark.y;
+
+    return clampMarkToPage(
+      {
+        ...mark,
+        x: nextX,
+        y: nextY,
+        width: nextWidth,
+        height: nextHeight,
+      },
+      pages
+    );
+  }
+
   if (mark.kind === "pngSignature" && mark.lockAspectRatio === false) {
     const nextWidth = Math.max(24, mark.width + (corner.includes("w") ? -dx : dx));
     const nextHeight = Math.max(12, mark.height + (corner.includes("n") ? -dy : dy));
@@ -2544,6 +3234,7 @@ function areMarksEqual(left: Mark[], right: Mark[]) {
       mark.thickness === other.thickness &&
       mark.lockAspectRatio === other.lockAspectRatio &&
       JSON.stringify(mark.comment ?? null) === JSON.stringify(other.comment ?? null) &&
+      JSON.stringify(mark.textStyle ?? null) === JSON.stringify(other.textStyle ?? null) &&
       JSON.stringify(mark.markupRects ?? []) === JSON.stringify(other.markupRects ?? []) &&
       mark.strokeOpacity === other.strokeOpacity &&
       JSON.stringify(mark.strokePoints ?? []) === JSON.stringify(other.strokePoints ?? [])
