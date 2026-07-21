@@ -95,6 +95,7 @@ type ShapeTool = `shape:${ShapeKind}`;
 type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | ShapeTool | TextMarkupKind;
 type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | "comment" | "shape" | TextMarkupKind;
 type LeftPanel = "pages" | "insert" | "bookmarks" | "comments" | "search";
+type WorkspaceMode = "organise" | "edit" | "annotate" | "review" | "assemble" | "publish";
 type WorkState = {
   message: string;
   progress?: number;
@@ -290,6 +291,7 @@ export function App() {
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
   const [leftPanel, setLeftPanel] = useState<LeftPanel>("pages");
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceMode>("organise");
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [selectedPageIds, setSelectedPageIds] = useState<string[]>([demoPages[0].id]);
@@ -350,6 +352,26 @@ export function App() {
     const normalized = query.trim().toLowerCase();
     return pages.filter((page) => String(page.pageNumber).includes(normalized));
   }, [pages, query]);
+  const workspaceItems: Array<{ id: WorkspaceMode; icon: ReactElement; title: string; description: string }> = [
+    { id: "organise", icon: <FilePlus2 />, title: "Organise", description: "Pages and order" },
+    { id: "edit", icon: <TextCursorInput />, title: "Edit", description: "Text, images, signatures" },
+    { id: "annotate", icon: <Pencil />, title: "Annotate", description: "Markup and shapes" },
+    { id: "review", icon: <MessageSquare />, title: "Review", description: "Comments and replies" },
+    { id: "assemble", icon: <Files />, title: "Assemble", description: "Files and structure" },
+    { id: "publish", icon: <Download />, title: "Publish", description: "Export output" },
+  ];
+  const activeWorkspaceItem = workspaceItems.find((workspace) => workspace.id === activeWorkspace) ?? workspaceItems[0];
+  const canShowObjectInspector = activeWorkspace === "edit" || activeWorkspace === "annotate";
+
+  function selectWorkspace(workspace: WorkspaceMode) {
+    setActiveWorkspace(workspace);
+    setIsLeftPanelCollapsed(false);
+    if (workspace === "organise") setLeftPanel("pages");
+    if (workspace === "review") setLeftPanel("comments");
+    if (workspace === "assemble" || workspace === "edit") setLeftPanel("insert");
+    if (workspace === "publish") setLeftPanel("insert");
+    if (workspace === "annotate") setLeftPanel("comments");
+  }
 
   function getPageByNumber(pageNumber: number) {
     return pages.find((page) => page.pageNumber === pageNumber) ?? pages[0];
@@ -2175,59 +2197,111 @@ export function App() {
         </div>
       ) : null}
 
-      <nav className="main-toolbar" aria-label="PDF tools">
-        <div className="toolbar-group primary-tools" aria-label="Navigation">
-          <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
-          <ToolButton icon={<Hand />} label="Hand tool" disabled />
-          <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} />
-          <span className="zoom-label">{Math.round(zoom * 100)}%</span>
-          <ToolButton icon={<ZoomIn />} label="Zoom in" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} disabled={isBusy} />
-          <ToolButton icon={<Maximize2 />} label="Fit page" onClick={() => setZoom(1)} disabled={isBusy} />
+      <nav className="main-toolbar" aria-label={`${activeWorkspaceItem.title} workspace tools`}>
+        <div className="toolbar-context">
+          <span>{activeWorkspaceItem.title}</span>
+          <strong>{activeWorkspaceItem.description}</strong>
         </div>
-        <ToolbarMenu icon={<Plus />} label="Insert">
-          <MenuToolButton icon={<TextCursorInput />} label="Text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
-          <MenuToolButton icon={<ImageIcon />} label="Image" active={activeTool === "image"} onClick={() => { setActiveTool("image"); imageInput.current?.click(); }} disabled={isBusy} />
-          <MenuToolButton icon={<PenLine />} label="PNG signature" active={activeTool === "pngSignature"} onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} disabled={isBusy} />
-          <MenuToolButton icon={<PenLine />} label="Signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
-          <MenuToolButton icon={<FilePlus2 />} label="Blank pages" onClick={() => setActivePageDialog("blank")} disabled={isBusy} />
-          <MenuToolButton icon={<Files />} label="Combine files" onClick={() => setActivePageDialog("merge")} disabled={isBusy} />
-        </ToolbarMenu>
-        <div className="toolbar-group compact-tools" aria-label="Markup">
-          <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
-          <ToolButton icon={<Highlighter />} label="Highlight selected text" active={activeTool === "textHighlight"} onClick={() => setActiveTool("textHighlight")} disabled={isBusy} />
-          <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
-          <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
-        </div>
-        <ToolbarMenu icon={<Square />} label="Shapes">
-          <MenuToolButton icon={<Highlighter />} label="Area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
-          <MenuToolButton icon={<Square />} label="Rectangle" active={activeTool === "shape:rectangle"} onClick={() => setActiveTool("shape:rectangle")} disabled={isBusy} />
-          <MenuToolButton icon={<Circle />} label="Ellipse" active={activeTool === "shape:ellipse"} onClick={() => setActiveTool("shape:ellipse")} disabled={isBusy} />
-          <MenuToolButton icon={<Minus />} label="Line" active={activeTool === "shape:line"} onClick={() => setActiveTool("shape:line")} disabled={isBusy} />
-          <MenuToolButton icon={<CornerUpRight />} label="Arrow" active={activeTool === "shape:arrow"} onClick={() => setActiveTool("shape:arrow")} disabled={isBusy} />
-          <MenuToolButton icon={<CornerUpRight />} label="Double arrow" active={activeTool === "shape:doubleArrow"} onClick={() => setActiveTool("shape:doubleArrow")} disabled={isBusy} />
-          <MenuToolButton icon={<Square />} label="Rounded rectangle" active={activeTool === "shape:roundedRectangle"} onClick={() => setActiveTool("shape:roundedRectangle")} disabled={isBusy} />
-          <MenuToolButton icon={<Square />} label="Polygon" active={activeTool === "shape:polygon"} onClick={() => setActiveTool("shape:polygon")} disabled={isBusy} />
-          <MenuToolButton icon={<Circle />} label="Cloud" active={activeTool === "shape:cloud"} onClick={() => setActiveTool("shape:cloud")} disabled={isBusy} />
-          <MenuToolButton icon={<MessageSquare />} label="Callout" active={activeTool === "shape:callout"} onClick={() => setActiveTool("shape:callout")} disabled={isBusy} />
-        </ToolbarMenu>
-        <div className="toolbar-group compact-tools" aria-label="Review">
-          <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
-          <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
-        </div>
-        <div className="toolbar-group history-tools" aria-label="History and export">
-          <ToolButton icon={<Undo2 />} label="Undo" onClick={undo} disabled={!canUndo} />
-          <ToolButton icon={<Redo2 />} label="Redo" onClick={redo} disabled={!canRedo} />
-          <ToolButton icon={<Download />} label="Export edited PDF" onClick={() => void exportPdf()} disabled={isBusy} />
-        </div>
+        {activeWorkspace === "organise" ? (
+          <>
+            <div className="toolbar-group" aria-label="Page actions">
+              <ToolButton icon={<FilePlus2 />} label="Insert blank pages" onClick={() => setActivePageDialog("blank")} disabled={isBusy} />
+              <ToolButton icon={<Files />} label="Combine files" onClick={() => setActivePageDialog("merge")} disabled={isBusy} />
+              <ToolButton icon={<Plus />} label="Duplicate selected pages" onClick={duplicatePage} disabled={isBusy} />
+              <ToolButton icon={<CornerUpRight />} label="Rotate selected pages clockwise" onClick={() => void rotateSelectedPages(90)} disabled={isBusy} />
+              <ToolButton icon={<Trash2 />} label="Delete selected pages" onClick={deleteSelectedPages} disabled={isBusy || pages.length === 0} />
+            </div>
+            <ToolbarMenu icon={<MoreHorizontal />} label="More page actions">
+              <MenuToolButton icon={<PanelLeftOpen />} label="Select all pages" onClick={selectAllPages} disabled={isBusy} />
+              <MenuToolButton icon={<PanelLeftClose />} label="Clear page selection" onClick={clearPageSelection} disabled={isBusy} />
+              <MenuToolButton icon={<CornerUpRight />} label="Rotate left" onClick={() => void rotateSelectedPages(-90)} disabled={isBusy} />
+              <MenuToolButton icon={<CornerUpRight />} label="Rotate 180" onClick={() => void rotateSelectedPages(180)} disabled={isBusy} />
+              <MenuToolButton icon={<Files />} label="Replace page" onClick={() => setActivePageDialog("replace")} disabled={isBusy} />
+              <MenuToolButton icon={<Download />} label="Extract pages" onClick={() => setActivePageDialog("extract")} disabled={isBusy} />
+              <MenuToolButton icon={<Minus />} label="Split PDF" onClick={() => setActivePageDialog("split")} disabled={isBusy || pages.length <= 1} />
+            </ToolbarMenu>
+          </>
+        ) : null}
+        {activeWorkspace === "edit" ? (
+          <>
+            <div className="toolbar-group" aria-label="Navigation and edit tools">
+              <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
+              <ToolButton icon={<Hand />} label="Hand tool" disabled />
+              <ToolButton icon={<ZoomOut />} label="Zoom out" onClick={() => setZoom((value) => Math.max(0.55, value - 0.1))} disabled={isBusy} />
+              <span className="zoom-label">{Math.round(zoom * 100)}%</span>
+              <ToolButton icon={<ZoomIn />} label="Zoom in" onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))} disabled={isBusy} />
+              <ToolButton icon={<Maximize2 />} label="Fit page" onClick={() => setZoom(1)} disabled={isBusy} />
+            </div>
+            <div className="toolbar-group" aria-label="Insert editable objects">
+              <ToolButton icon={<TextCursorInput />} label="Add text" active={activeTool === "text"} onClick={() => setActiveTool("text")} disabled={isBusy} />
+              <ToolButton icon={<ImageIcon />} label="Add image" active={activeTool === "image"} onClick={() => { setActiveTool("image"); imageInput.current?.click(); }} disabled={isBusy} />
+              <ToolButton icon={<PenLine />} label="Upload PNG signature" active={activeTool === "pngSignature"} onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} disabled={isBusy} />
+              <ToolButton icon={<PenLine />} label="Add signature text" active={activeTool === "signature"} onClick={() => setActiveTool("signature")} disabled={isBusy} />
+            </div>
+          </>
+        ) : null}
+        {activeWorkspace === "annotate" ? (
+          <>
+            <div className="toolbar-group" aria-label="Text markup tools">
+              <ToolButton icon={<Highlighter />} label="Highlight selected text" active={activeTool === "textHighlight"} onClick={() => setActiveTool("textHighlight")} disabled={isBusy} />
+              <ToolButton icon={<Underline />} label="Underline selected text" active={activeTool === "underline"} onClick={() => setActiveTool("underline")} disabled={isBusy} />
+              <ToolButton icon={<Strikethrough />} label="Strikethrough selected text" active={activeTool === "strikethrough"} onClick={() => setActiveTool("strikethrough")} disabled={isBusy} />
+              <ToolButton icon={<Pencil />} label="Draw freehand" active={activeTool === "draw"} onClick={() => setActiveTool("draw")} disabled={isBusy} />
+              <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
+            </div>
+            <ToolbarMenu icon={<Square />} label="Shapes">
+              <MenuToolButton icon={<Highlighter />} label="Area highlight" active={activeTool === "highlight"} onClick={() => setActiveTool("highlight")} disabled={isBusy} />
+              <MenuToolButton icon={<Square />} label="Rectangle" active={activeTool === "shape:rectangle"} onClick={() => setActiveTool("shape:rectangle")} disabled={isBusy} />
+              <MenuToolButton icon={<Circle />} label="Ellipse" active={activeTool === "shape:ellipse"} onClick={() => setActiveTool("shape:ellipse")} disabled={isBusy} />
+              <MenuToolButton icon={<Minus />} label="Line" active={activeTool === "shape:line"} onClick={() => setActiveTool("shape:line")} disabled={isBusy} />
+              <MenuToolButton icon={<CornerUpRight />} label="Arrow" active={activeTool === "shape:arrow"} onClick={() => setActiveTool("shape:arrow")} disabled={isBusy} />
+              <MenuToolButton icon={<CornerUpRight />} label="Double arrow" active={activeTool === "shape:doubleArrow"} onClick={() => setActiveTool("shape:doubleArrow")} disabled={isBusy} />
+              <MenuToolButton icon={<Square />} label="Rounded rectangle" active={activeTool === "shape:roundedRectangle"} onClick={() => setActiveTool("shape:roundedRectangle")} disabled={isBusy} />
+              <MenuToolButton icon={<Square />} label="Polygon" active={activeTool === "shape:polygon"} onClick={() => setActiveTool("shape:polygon")} disabled={isBusy} />
+              <MenuToolButton icon={<Circle />} label="Cloud" active={activeTool === "shape:cloud"} onClick={() => setActiveTool("shape:cloud")} disabled={isBusy} />
+              <MenuToolButton icon={<MessageSquare />} label="Callout" active={activeTool === "shape:callout"} onClick={() => setActiveTool("shape:callout")} disabled={isBusy} />
+            </ToolbarMenu>
+          </>
+        ) : null}
+        {activeWorkspace === "review" ? (
+          <div className="toolbar-group" aria-label="Review tools">
+            <ToolButton icon={<MessageSquare />} label="Add comment" active={activeTool === "comment"} onClick={() => setActiveTool("comment")} disabled={isBusy} />
+            <ToolButton icon={<CheckCircle2 />} label="Show open comments" onClick={() => setCommentFilter("open")} disabled={isBusy} />
+            <ToolButton icon={<MessageSquare />} label="Show resolved comments" onClick={() => setCommentFilter("resolved")} disabled={isBusy} />
+            <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
+          </div>
+        ) : null}
+        {activeWorkspace === "assemble" ? (
+          <div className="toolbar-group" aria-label="Assembly tools">
+            <ToolButton icon={<Files />} label="Open PDF" onClick={() => fileInput.current?.click()} disabled={isBusy} />
+            <ToolButton icon={<Plus />} label="Import PDFs" onClick={() => importPdfInput.current?.click()} disabled={isBusy} />
+            <ToolButton icon={<Files />} label="Combine files" onClick={() => setActivePageDialog("merge")} disabled={isBusy} />
+            <ToolButton icon={<BookOpen />} label="Bookmarks" onClick={() => setLeftPanel("bookmarks")} disabled={isBusy} />
+            <ToolButton icon={<FilePlus2 />} label="Insert blank pages" onClick={() => setActivePageDialog("blank")} disabled={isBusy} />
+          </div>
+        ) : null}
+        {activeWorkspace === "publish" ? (
+          <div className="toolbar-group" aria-label="Publish tools">
+            <ToolButton icon={<Download />} label="Export edited PDF" onClick={() => void exportPdf()} disabled={isBusy} />
+            <ToolButton icon={<Undo2 />} label="Undo" onClick={undo} disabled={!canUndo} />
+            <ToolButton icon={<Redo2 />} label="Redo" onClick={redo} disabled={!canRedo} />
+          </div>
+        ) : null}
       </nav>
 
       <section className="workspace">
-        <nav className="left-nav" aria-label="Navigation panels">
-          <RailButton icon={<FilePlus2 />} label="Pages" active={leftPanel === "pages" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("pages"); setIsLeftPanelCollapsed(false); }} />
-          <RailButton icon={<Plus />} label="Insert" active={leftPanel === "insert" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("insert"); setIsLeftPanelCollapsed(false); }} />
-          <RailButton icon={<BookOpen />} label="Bookmarks" active={leftPanel === "bookmarks" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("bookmarks"); setIsLeftPanelCollapsed(false); }} />
-          <RailButton icon={<MessageSquare />} label="Comments" active={leftPanel === "comments" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("comments"); setIsLeftPanelCollapsed(false); }} />
-          <RailButton icon={<Search />} label="Search" active={leftPanel === "search" && !isLeftPanelCollapsed} onClick={() => { setLeftPanel("search"); setIsLeftPanelCollapsed(false); }} />
+        <nav className="left-nav workspace-nav" aria-label="Workspaces">
+          <span className="workspace-nav-label">Workspace</span>
+          {workspaceItems.map((workspace) => (
+            <WorkspaceButton
+              key={workspace.id}
+              icon={workspace.icon}
+              title={workspace.title}
+              description={workspace.description}
+              active={activeWorkspace === workspace.id && !isLeftPanelCollapsed}
+              onClick={() => selectWorkspace(workspace.id)}
+            />
+          ))}
           <button
             className="rail-button rail-collapse"
             onClick={() => setIsLeftPanelCollapsed((value) => !value)}
@@ -2242,15 +2316,15 @@ export function App() {
           <aside className="left-panel" onDragOver={leftPanel === "pages" ? handlePagesPanelDragOver : undefined} onDrop={leftPanel === "pages" ? handlePagesPanelDrop : undefined}>
             <div className="panel-header">
               <div>
-                <h2>{getLeftPanelTitle(leftPanel)}</h2>
-                <span>{leftPanel === "pages" ? `${pages.length} pages${selectedPageCount > 1 ? ` - ${selectedPageCount} selected` : ""}` : pdfName}</span>
+                <h2>{getWorkspacePanelTitle(activeWorkspace)}</h2>
+                <span>{getWorkspacePanelSubtitle(activeWorkspace, pages.length, selectedPageCount, pdfName, comments.length)}</span>
               </div>
               <button className="panel-icon-button" onClick={() => setIsLeftPanelCollapsed(true)} title="Collapse left panel" aria-label="Collapse left panel">
                 <PanelLeftClose size={16} />
               </button>
             </div>
 
-            {leftPanel === "pages" ? (
+            {activeWorkspace === "organise" ? (
               <>
                 <div className="searchbox">
                   <Search size={15} />
@@ -2336,23 +2410,50 @@ export function App() {
               </>
             ) : null}
 
-            {leftPanel === "insert" ? (
-              <div className="panel-empty">
-                <Plus size={22} />
-                <strong>Insert</strong>
-                <button className="button ghost" onClick={() => fileInput.current?.click()} disabled={isBusy} title="Open PDF" aria-label="Open PDF">
-                  Open PDF
+            {activeWorkspace === "edit" ? (
+              <div className="workspace-panel-content">
+                <ToolCard icon={<MousePointer2 />} title="Select and move" description="Choose, move, resize, duplicate, or delete existing objects." onClick={() => setActiveTool("select")} />
+                <ToolCard icon={<TextCursorInput />} title="Text" description="Place editable overlay text boxes on the page." onClick={() => setActiveTool("text")} />
+                <ToolCard icon={<ImageIcon />} title="Image" description="Add PNG, JPG, SVG, or WebP artwork." onClick={() => { setActiveTool("image"); imageInput.current?.click(); }} />
+                <ToolCard icon={<PenLine />} title="Signature" description="Place transparent PNG signatures or signature text." onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} />
+              </div>
+            ) : null}
+
+            {activeWorkspace === "annotate" ? (
+              <div className="workspace-panel-content">
+                <ToolCard icon={<Highlighter />} title="Text markup" description="Highlight, underline, or strike selected PDF text." onClick={() => setActiveTool("textHighlight")} />
+                <ToolCard icon={<Pencil />} title="Draw" description="Use freehand strokes for notes, sketches, and signatures." onClick={() => setActiveTool("draw")} />
+                <ToolCard icon={<Square />} title="Shapes" description="Add rectangles, ellipses, lines, arrows, clouds, and callouts." onClick={() => setActiveTool("shape:rectangle")} />
+                <ToolCard icon={<MessageSquare />} title="Sticky note" description="Place comments directly on the current page." onClick={() => setActiveTool("comment")} />
+              </div>
+            ) : null}
+
+            {activeWorkspace === "assemble" ? (
+              <div className="workspace-panel-content">
+                <ToolCard icon={<Files />} title="Open PDF" description="Open a PDF as the working document." onClick={() => fileInput.current?.click()} />
+                <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => importPdfInput.current?.click()} />
+                <ToolCard icon={<Files />} title="Combine files" description="Review multiple PDFs before merging them." onClick={() => setActivePageDialog("merge")} />
+                <ToolCard icon={<BookOpen />} title="Bookmarks" description="Bookmark structure is prepared here as the project grows." onClick={() => setLeftPanel("bookmarks")} />
+              </div>
+            ) : null}
+
+            {activeWorkspace === "publish" ? (
+              <div className="workspace-panel-content publish-summary">
+                <div className="publish-ready">
+                  <Download size={24} />
+                  <strong>Ready to export</strong>
+                  <span>{pages.length} pages · {marks.length} edits · {comments.length} comments</span>
+                </div>
+                <button className="button primary full-width" onClick={() => void exportPdf()} disabled={isBusy} title="Export edited PDF" aria-label="Export edited PDF">
+                  Export PDF
                 </button>
-                <button className="button ghost" onClick={() => setActivePageDialog("merge")} disabled={isBusy} title="Combine PDFs" aria-label="Combine PDFs">
-                  Combine PDFs
-                </button>
-                <button className="button ghost" onClick={() => setActivePageDialog("blank")} disabled={isBusy} title="Insert blank pages" aria-label="Insert blank pages">
-                  Blank pages
+                <button className="button ghost full-width" onClick={() => setActivePageDialog("extract")} disabled={isBusy} title="Extract selected pages" aria-label="Extract selected pages">
+                  Export selected pages
                 </button>
               </div>
             ) : null}
 
-            {leftPanel === "bookmarks" ? (
+            {leftPanel === "bookmarks" && activeWorkspace !== "assemble" ? (
               <div className="panel-empty">
                 <BookOpen size={22} />
                 <strong>No bookmarks yet</strong>
@@ -2360,7 +2461,7 @@ export function App() {
               </div>
             ) : null}
 
-            {leftPanel === "comments" ? (
+            {activeWorkspace === "review" ? (
               <div className="panel-list">
                 {comments.length > 0 ? (
                   comments.map((mark) => (
@@ -2380,7 +2481,7 @@ export function App() {
               </div>
             ) : null}
 
-            {leftPanel === "search" ? (
+            {leftPanel === "search" && activeWorkspace !== "review" ? (
               <div className="panel-empty">
                 <Search size={22} />
                 <strong>Page search</strong>
@@ -2460,17 +2561,88 @@ export function App() {
         <aside className="inspector">
           <div className="inspector-header">
             <div>
-              <h2>Properties</h2>
-              <span>{selected ? getMarkLabel(selected) : activeTool === "draw" ? "Draw tool" : "Document"}</span>
+              <h2>{getWorkspaceInspectorTitle(activeWorkspace)}</h2>
+              <span>{(canShowObjectInspector || (activeWorkspace === "review" && selected?.kind === "comment")) && selected ? getMarkLabel(selected) : getWorkspaceInspectorSubtitle(activeWorkspace)}</span>
             </div>
             <button className="panel-icon-button" onClick={() => setIsRightPanelCollapsed(true)} title="Collapse right panel" aria-label="Collapse right panel">
               <PanelRightClose size={16} />
             </button>
           </div>
           <details className="inspector-section" open>
-            <summary>{selected ? "Selection" : activeTool === "draw" ? "Draw" : "Document"}</summary>
+            <summary>{(canShowObjectInspector || (activeWorkspace === "review" && selected?.kind === "comment")) && selected ? "Selection" : getWorkspaceInspectorTitle(activeWorkspace)}</summary>
             <div className="inspector-section-body">
-          {activeTool === "draw" ? (
+          {activeWorkspace === "organise" ? (
+            <div className="control-stack workspace-properties">
+              <div className="property-readout">
+                <span>Current page</span>
+                <strong>{currentPage}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Size</span>
+                <strong>{currentPageView ? `${Math.round(currentPageView.width / PAGE_SCALE)} x ${Math.round(currentPageView.height / PAGE_SCALE)} pt` : "No page"}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Orientation</span>
+                <strong>{currentPageView && currentPageView.width >= currentPageView.height ? "Landscape" : "Portrait"}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Rotation</span>
+                <strong>{currentPageView?.rotation ?? 0}deg</strong>
+              </div>
+              <label>
+                Selected page label
+                <input
+                  value={pages.find((page) => selectedPageIds.includes(page.id))?.label ?? ""}
+                  onChange={(event) => updateSelectedPageLabel(event.target.value)}
+                  placeholder="Cover, Section A, A-01..."
+                  disabled={isBusy}
+                />
+              </label>
+            </div>
+          ) : null}
+          {activeWorkspace === "assemble" ? (
+            <div className="control-stack workspace-properties">
+              <div className="property-readout">
+                <span>Document</span>
+                <strong>{pdfName}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Pages</span>
+                <strong>{pages.length}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Source files</span>
+                <strong>{Object.keys(sourceDocuments).length || 1}</strong>
+              </div>
+              <button className="button ghost full-width" onClick={() => setActivePageDialog("merge")} disabled={isBusy} title="Combine PDF files" aria-label="Combine PDF files">
+                Combine PDFs
+              </button>
+            </div>
+          ) : null}
+          {activeWorkspace === "publish" ? (
+            <div className="control-stack workspace-properties">
+              <div className="property-readout">
+                <span>Output</span>
+                <strong>PDF</strong>
+              </div>
+              <div className="property-readout">
+                <span>Pages</span>
+                <strong>{pages.length}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Edits</span>
+                <strong>{marks.length}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Comments</span>
+                <strong>{comments.length}</strong>
+              </div>
+              <button className="button primary full-width" onClick={() => void exportPdf()} disabled={isBusy} title="Export edited PDF" aria-label="Export edited PDF">
+                Export PDF
+              </button>
+            </div>
+          ) : null}
+          {activeWorkspace === "annotate" && activeTool === "draw" ? (
             <div className="control-stack pen-controls">
               <label>
                 Stroke colour
@@ -2536,7 +2708,7 @@ export function App() {
               </label>
             </div>
           ) : null}
-          {selected?.kind === "comment" && selected.comment ? (
+          {activeWorkspace === "review" && selected?.kind === "comment" && selected.comment ? (
             <div className="control-stack comment-editor">
               <div className={`comment-status ${selected.comment.resolved ? "resolved" : ""}`}>
                 {selected.comment.resolved ? <CheckCircle2 size={16} aria-hidden="true" /> : <MessageSquare size={16} aria-hidden="true" />}
@@ -2660,7 +2832,7 @@ export function App() {
                 Delete comment
               </button>
             </div>
-          ) : selected?.kind === "text" ? (
+          ) : activeWorkspace === "edit" && selected?.kind === "text" ? (
             <div className="control-stack text-box-controls">
               <button className="button ghost full-width" onClick={() => startTextEdit(selected)} title="Edit text box content" aria-label="Edit text box content">
                 Edit text
@@ -2895,7 +3067,7 @@ export function App() {
                 </button>
               </div>
             </div>
-          ) : selected?.kind === "shape" && selected.shapeStyle ? (
+          ) : activeWorkspace === "annotate" && selected?.kind === "shape" && selected.shapeStyle ? (
             <div className="control-stack shape-controls">
               <div className="comment-status">
                 <Square size={16} aria-hidden="true" />
@@ -3063,7 +3235,7 @@ export function App() {
                 </button>
               </div>
             </div>
-          ) : selected ? (
+          ) : canShowObjectInspector && selected ? (
             <div className="control-stack">
               {!isTextMarkupKind(selected.kind) ? (
                 <label>
@@ -3283,15 +3455,16 @@ export function App() {
                 </div>
               ) : null}
             </div>
-          ) : (
+          ) : activeWorkspace === "organise" || activeWorkspace === "assemble" || activeWorkspace === "publish" ? null : (
             <div className="empty-panel">
-              <ImageIcon size={30} />
-              <p>Select an annotation or choose a tool to add content to the page.</p>
+              {activeWorkspaceItem.icon}
+              <p>{getWorkspaceEmptyInspectorMessage(activeWorkspace)}</p>
             </div>
           )}
             </div>
           </details>
 
+          {activeWorkspace === "review" ? (
           <details className="comments-panel inspector-section" open aria-label="Comments">
             <summary>Comments</summary>
             <div className="comments-panel-body">
@@ -3345,6 +3518,7 @@ export function App() {
             </div>
             </div>
           </details>
+          ) : null}
 
           <div className="document-stats">
             <div>
@@ -4094,6 +4268,52 @@ function MenuToolButton({
   );
 }
 
+function WorkspaceButton({
+  icon,
+  title,
+  description,
+  active,
+  onClick,
+}: {
+  icon: ReactElement;
+  title: string;
+  description: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className={`workspace-button ${active ? "active" : ""}`} onClick={onClick} title={`${title}: ${description}`} aria-label={`${title} workspace: ${description}`} aria-pressed={active}>
+      {icon}
+      <span>
+        <strong>{title}</strong>
+        <small>{description}</small>
+      </span>
+    </button>
+  );
+}
+
+function ToolCard({
+  icon,
+  title,
+  description,
+  onClick,
+}: {
+  icon: ReactElement;
+  title: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button className="tool-card" onClick={onClick} title={title} aria-label={title}>
+      {icon}
+      <span>
+        <strong>{title}</strong>
+        <small>{description}</small>
+      </span>
+    </button>
+  );
+}
+
 function RailButton({
   icon,
   label,
@@ -4118,6 +4338,51 @@ function getLeftPanelTitle(panel: LeftPanel) {
   if (panel === "comments") return "Comments";
   if (panel === "search") return "Search";
   return "Pages";
+}
+
+function getWorkspacePanelTitle(workspace: WorkspaceMode) {
+  if (workspace === "organise") return "Pages";
+  if (workspace === "edit") return "Edit tools";
+  if (workspace === "annotate") return "Markup tools";
+  if (workspace === "review") return "Comments";
+  if (workspace === "assemble") return "Project assets";
+  return "Publish";
+}
+
+function getWorkspacePanelSubtitle(workspace: WorkspaceMode, pageCount: number, selectedPageCount: number, pdfName: string, commentCount: number) {
+  if (workspace === "organise") return `${pageCount} pages${selectedPageCount > 1 ? ` - ${selectedPageCount} selected` : ""}`;
+  if (workspace === "review") return `${commentCount} comments`;
+  if (workspace === "publish") return "Export and output";
+  if (workspace === "assemble") return pdfName;
+  if (workspace === "annotate") return "Markup, notes, and shapes";
+  return "Objects and placement";
+}
+
+function getWorkspaceInspectorTitle(workspace: WorkspaceMode) {
+  if (workspace === "organise") return "Page properties";
+  if (workspace === "edit") return "Object properties";
+  if (workspace === "annotate") return "Annotation style";
+  if (workspace === "review") return "Comment details";
+  if (workspace === "assemble") return "Project settings";
+  return "Export settings";
+}
+
+function getWorkspaceInspectorSubtitle(workspace: WorkspaceMode) {
+  if (workspace === "organise") return "Page information, rotation, and labels";
+  if (workspace === "edit") return "Select an object to edit position and appearance";
+  if (workspace === "annotate") return "Choose markup to adjust stroke, fill, and opacity";
+  if (workspace === "review") return "Select a comment to view its thread";
+  if (workspace === "assemble") return "Import and organise document assets";
+  return "Ready to export the current document";
+}
+
+function getWorkspaceEmptyInspectorMessage(workspace: WorkspaceMode) {
+  if (workspace === "organise") return "Select a page thumbnail to inspect page information, rotation, and labels.";
+  if (workspace === "edit") return "Select an object or choose an edit tool to adjust placement, size, and appearance.";
+  if (workspace === "annotate") return "Select markup or choose an annotation tool to adjust styling.";
+  if (workspace === "review") return "Select a comment to review replies, status, and marker colour.";
+  if (workspace === "assemble") return "Import PDFs or use the project asset actions to build this publication.";
+  return "Ready to export. Choose export from the toolbar or Publish panel.";
 }
 
 function ProgressOverlay({ message, progress }: WorkState) {
