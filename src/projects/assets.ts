@@ -4,6 +4,7 @@ type SourceLike = {
   id: string;
   name: string;
   bytes: Uint8Array;
+  mimeType?: string;
 };
 
 type PageLike = {
@@ -51,9 +52,9 @@ export function collectProjectAssets(
   const sourceAssets = Object.values(sources).map((source) => ({
     id: source.id,
     name: source.name,
-    type: "source-pdf" as const,
-    path: `sources/${source.id}.pdf`,
-    mimeType: "application/pdf",
+    type: getSourceAssetType(source),
+    path: `sources/${source.id}${getSourceExtension(source)}`,
+    mimeType: source.mimeType ?? "application/pdf",
     size: source.bytes.byteLength,
     dateAdded: collectedAt,
     contentHash: quickContentHash(source.bytes),
@@ -95,6 +96,16 @@ export function collectProjectAssets(
     }));
 
   return [...sourceAssets, ...standaloneAssets, ...embeddedAssets];
+}
+
+function getSourceAssetType(source: SourceLike) {
+  if (source.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || source.name.toLowerCase().endsWith(".docx")) return "source-docx" as const;
+  return "source-pdf" as const;
+}
+
+function getSourceExtension(source: SourceLike) {
+  if (source.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || source.name.toLowerCase().endsWith(".docx")) return ".docx";
+  return ".pdf";
 }
 
 function quickContentHash(bytes: Uint8Array) {

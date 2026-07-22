@@ -12,6 +12,7 @@ type SourceLike = {
   id: string;
   name: string;
   bytes: Uint8Array;
+  mimeType?: string;
 };
 
 type CreateProjectInput = {
@@ -53,8 +54,8 @@ export function buildProjectManifest(input: CreateProjectInput): ProjectManifest
     annotations: input.annotations,
     publishingSettings: input.publishingSettings ?? createDefaultPublishingSettings(),
     navigation: input.navigation,
-    sources: allAssets.filter((asset) => asset.type === "source-pdf"),
-    assets: allAssets.filter((asset) => asset.type !== "source-pdf"),
+    sources: allAssets.filter((asset) => asset.type === "source-pdf" || asset.type === "source-docx"),
+    assets: allAssets.filter((asset) => asset.type !== "source-pdf" && asset.type !== "source-docx"),
   };
 }
 
@@ -83,8 +84,9 @@ export function serializeProject(input: CreateProjectInput) {
   const files: Record<string, Uint8Array | string> = {
     "manifest.json": JSON.stringify(manifest, null, 2),
   };
+  const sourcePaths = new Map(manifest.sources.map((source) => [source.id, source.path]));
   for (const source of Object.values(input.sourceDocuments)) {
-    files[`sources/${source.id}.pdf`] = source.bytes;
+    files[sourcePaths.get(source.id) ?? `sources/${source.id}.pdf`] = source.bytes;
   }
   for (const mark of input.annotations as Array<{ id: string; kind: string; imageDataUrl?: string }>) {
     if ((mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl) {

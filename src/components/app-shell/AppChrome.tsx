@@ -1,4 +1,4 @@
-import { Download, FilePlus2, FolderOpen, Monitor, Moon, MoreHorizontal, Printer, Save, Sun, X } from "lucide-react";
+import { Download, FilePlus2, FileText, FolderOpen, Monitor, Moon, MoreHorizontal, Printer, Save, Sun, X } from "lucide-react";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -13,6 +13,7 @@ type AppChromeProps = {
   onNewProject: () => void;
   onOpenProject: () => void;
   onOpen: () => void;
+  onImportDocx: () => void;
   canSaveProject: boolean;
   onSaveProject: () => void;
   onSaveProjectAs: () => void;
@@ -37,6 +38,7 @@ export function AppChrome({
   onNewProject,
   onOpenProject,
   onOpen,
+  onImportDocx,
   canSaveProject,
   onSaveProject,
   onSaveProjectAs,
@@ -76,6 +78,7 @@ export function AppChrome({
             <button onClick={onNewProject} disabled={isBusy}><FilePlus2 size={15} />New Project</button>
             <button onClick={onOpenProject} disabled={isBusy}><FolderOpen size={15} />Open Project</button>
             <button onClick={onOpen} disabled={isBusy}><FolderOpen size={15} />Open PDF</button>
+            <button onClick={onImportDocx} disabled={isBusy}><FileText size={15} />Import Word document</button>
             <button onClick={onSaveProject} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project</button>
             <button onClick={onSaveProjectAs} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project As</button>
             <button onClick={onCloseProject} disabled={isBusy || !canSaveProject}><X size={15} />Close Project</button>

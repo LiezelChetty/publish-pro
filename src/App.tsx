@@ -122,6 +122,10 @@ import { buildTocEntries, getTocPageSize, layoutToc } from "./navigation/toc";
 import { validateNavigation } from "./navigation/validation";
 import { validateExportLinks } from "./navigation/linkValidation";
 import type { DocumentBookmark, NavigationState, PageReference, TocGeneratedPageMetadata, TocLayoutResult, TocManualEntry, TocSettings } from "./navigation/types";
+import { createBookmarksFromDocxHeadings } from "./office/docxBookmarks";
+import { importDocxDocument } from "./office/docxImport";
+import { defaultDocxImportOptions, validateDocxImportFile } from "./office/validation";
+import type { DocxImportOptions, DocxImportReport } from "./office/types";
 import {
   addRecentProject,
   clearRecentProjects,
@@ -258,6 +262,7 @@ type SourceDocument = {
   id: string;
   name: string;
   bytes: Uint8Array;
+  mimeType?: string;
 };
 
 type BlankPagePreset = "a4Portrait" | "a4Landscape" | "a3Portrait" | "a3Landscape" | "letterPortrait" | "letterLandscape" | "legalPortrait" | "legalLandscape" | "matchCurrent" | "custom";
@@ -406,6 +411,10 @@ export function App() {
   const [pageContextMenu, setPageContextMenu] = useState<PageContextMenuState>(null);
   const [mergeQueue, setMergeQueue] = useState<MergeQueueItem[]>([]);
   const [mergeInsertPosition, setMergeInsertPosition] = useState<InsertPosition>("after");
+  const [pendingDocxFile, setPendingDocxFile] = useState<File | null>(null);
+  const [docxImportOptions, setDocxImportOptions] = useState<DocxImportOptions>(defaultDocxImportOptions);
+  const [docxImportMode, setDocxImportMode] = useState<"replace" | "append">("replace");
+  const [docxImportReport, setDocxImportReport] = useState<DocxImportReport | null>(null);
   const [replaceFile, setReplaceFile] = useState<MergeQueueItem | null>(null);
   const [replaceSourcePage, setReplaceSourcePage] = useState(1);
   const [replacePreserveAnnotations, setReplacePreserveAnnotations] = useState(true);
@@ -423,6 +432,7 @@ export function App() {
   const [workState, setWorkState] = useState<WorkState | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const docxInput = useRef<HTMLInputElement>(null);
   const projectInput = useRef<HTMLInputElement>(null);
   const importPdfInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -652,7 +662,7 @@ export function App() {
     for (const source of bundle.manifest.sources) {
       const fileBytes = bundle.files[source.path];
       if (!fileBytes) throw new Error(`Project is missing source asset: ${source.name}`);
-      nextSources[source.id] = { id: source.id, name: source.name, bytes: fileBytes };
+      nextSources[source.id] = { id: source.id, name: source.name, bytes: fileBytes, mimeType: source.mimeType };
     }
 
     const nextPages = renumberPages(bundle.manifest.pages as PageView[]);
@@ -675,7 +685,7 @@ export function App() {
       });
       return assets;
     }, []);
-    const firstSource = Object.values(nextSources)[0];
+    const firstSource = Object.values(nextSources).find((source) => (source.mimeType ?? "application/pdf") === "application/pdf") ?? Object.values(nextSources)[0];
     const nextNavigation: NavigationState = {
       bookmarks: normalizeBookmarks(bundle.manifest.navigation?.bookmarks ?? []),
       tocSettings: { ...createDefaultTocSettings(), ...(bundle.manifest.navigation?.tocSettings ?? {}) },
@@ -1293,7 +1303,7 @@ export function App() {
       setProjectStatusMessage("PDF opened as an untitled project. Use Save Project to create a .pproj file.");
       setPdfName(file.name);
       setPdfBytes(bytes);
-      setSourceDocuments({ [sourceId]: { id: sourceId, name: file.name, bytes } });
+      setSourceDocuments({ [sourceId]: { id: sourceId, name: file.name, bytes, mimeType: "application/pdf" } });
       setProjectImageAssets([]);
       setActiveSourceDocumentId(sourceId);
       setPdfDoc(loaded);
@@ -1317,6 +1327,117 @@ export function App() {
     if (!file) return;
     if (hasOpenProject && hasUnsavedChanges && !window.confirm("Open this PDF and discard unsaved changes in the current project?")) return;
     void loadFile(file);
+  }
+
+  function beginDocxImport(file: File, mode: "replace" | "append") {
+    try {
+      validateDocxImportFile(file);
+      setPendingDocxFile(file);
+      setDocxImportMode(mode);
+      setDocxImportOptions(defaultDocxImportOptions);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "The selected Word document could not be imported.");
+    }
+  }
+
+  function handleDocxUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const mode = hasOpenProject ? "append" : "replace";
+    beginDocxImport(file, mode);
+  }
+
+  async function confirmDocxImport() {
+    if (!pendingDocxFile) return;
+    if (docxImportMode === "replace" && hasOpenProject && hasUnsavedChanges && !window.confirm("Import this Word document and discard unsaved changes in the current project?")) return;
+    try {
+      setErrorMessage("");
+      const result = await importDocxDocument(pendingDocxFile, docxImportOptions, (progress) => setWorkState({ message: progress.stage, progress: progress.progress }));
+      setWorkState({ message: "Rendering imported pages", progress: 88 });
+      const convertedPdf = await getDocument({ data: result.convertedPdfSource.bytes.slice() }).promise;
+      const importedPages: PageView[] = [];
+      for (let pageNumber = 1; pageNumber <= convertedPdf.numPages; pageNumber += 1) {
+        setWorkState({ message: `Rendering imported page ${pageNumber} of ${convertedPdf.numPages}`, progress: 88 + (pageNumber / convertedPdf.numPages) * 8 });
+        importedPages.push(await renderPage(await convertedPdf.getPage(pageNumber), result.convertedPdfSource.id));
+      }
+      const pageIdsByNumber = new Map(importedPages.map((page) => [page.sourcePageNumber ?? page.pageNumber, page.id]));
+      const importedBookmarks = docxImportOptions.createBookmarks ? createBookmarksFromDocxHeadings(result.headings, pageIdsByNumber) : [];
+      const imageAssets = result.imageAssets
+        .filter((image): image is typeof image & { mimeType: "image/png" | "image/jpeg" } => image.mimeType === "image/png" || image.mimeType === "image/jpeg")
+        .map<ProjectImageAsset>((image) => ({
+          id: image.id,
+          name: image.name,
+          dataUrl: image.dataUrl,
+          mimeType: image.mimeType,
+          naturalWidth: image.width,
+          naturalHeight: image.height,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }));
+      const importedSources: Record<string, SourceDocument> = {
+        [result.convertedPdfSource.id]: {
+          id: result.convertedPdfSource.id,
+          name: result.convertedPdfSource.name,
+          bytes: result.convertedPdfSource.bytes,
+          mimeType: result.convertedPdfSource.mimeType,
+        },
+      };
+      if (result.originalSource) {
+        importedSources[result.originalSource.id] = {
+          id: result.originalSource.id,
+          name: result.originalSource.name,
+          bytes: result.originalSource.bytes,
+          mimeType: result.originalSource.mimeType,
+        };
+      }
+
+      if (docxImportMode === "append" && hasOpenProject) {
+        const insertIndex = getPageInsertionIndex("after");
+        const nextPages = renumberPages([...pages.slice(0, insertIndex), ...importedPages, ...pages.slice(insertIndex)]);
+        setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
+        setProjectImageAssets((existing) => [...existing, ...imageAssets.filter((asset) => !existing.some((item) => item.dataUrl === asset.dataUrl))]);
+        commitDocument(nextPages, marks, null, insertIndex + 1, importedPages.map((page) => page.id));
+        commitNavigation({ bookmarks: [...bookmarks, ...importedBookmarks] });
+        setProjectStatusMessage(`Imported Word document ${pendingDocxFile.name} into the current project.`);
+      } else {
+        const projectName = result.projectName;
+        setHasOpenProject(true);
+        setProjectId(crypto.randomUUID());
+        setProjectMetadata(createProjectMetadata(projectName));
+        setSavedProjectFingerprint("");
+        setLastSavedAt(null);
+        setLastAutosavedAt(null);
+        setIsProjectDirty(true);
+        setProjectStatusMessage("Word document imported as an untitled Publish Pro project. Use Save Project to create a .pproj file.");
+        setPdfName(result.defaultPdfName);
+        setPdfBytes(result.convertedPdfSource.bytes);
+        setPdfDoc(null);
+        setActiveSourceDocumentId(result.convertedPdfSource.id);
+        setSourceDocuments(importedSources);
+        setProjectImageAssets(imageAssets);
+        setPages(importedPages);
+        setMarks([]);
+        resetNavigationState();
+        setBookmarks(importedBookmarks);
+        setPublishingSettings(result.publishingSettingsPatch ?? createDefaultPublishingSettings());
+        setPublishingHistory({ past: [], future: [] });
+        setHistory({ past: [], future: [] });
+        setSelectedMark(null);
+        setSelectedPageIds(importedPages[0] ? [importedPages[0].id] : []);
+        setLastSelectedPageId(importedPages[0]?.id ?? null);
+        setCurrentPage(1);
+        setActiveWorkspace("publish");
+        setLeftPanel(importedBookmarks.length > 0 ? "bookmarks" : "pages");
+      }
+      setDocxImportReport({ ...result.report, bookmarksCreated: importedBookmarks.length });
+      setPendingDocxFile(null);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(error instanceof Error ? error.message : "The Word document could not be imported.");
+    }
   }
 
   async function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -2300,7 +2421,7 @@ export function App() {
         setWorkState({ message: `Importing ${file.name}`, progress: (fileIndex / Math.max(1, files.length)) * 80 });
         const bytes = new Uint8Array(await file.arrayBuffer());
         const sourceId = crypto.randomUUID();
-        importedSources[sourceId] = { id: sourceId, name: file.name, bytes };
+        importedSources[sourceId] = { id: sourceId, name: file.name, bytes, mimeType: "application/pdf" };
         const importedDoc = await getDocument({ data: bytes.slice() }).promise;
         for (let pageIndex = 1; pageIndex <= importedDoc.numPages; pageIndex += 1) {
           importedPages.push(await renderPage(await importedDoc.getPage(pageIndex), sourceId));
@@ -2338,7 +2459,7 @@ export function App() {
 
       for (const item of validItems) {
         const ranges = parsePageRanges(item.range || `1-${item.pageCount}`, item.pageCount);
-        importedSources[item.sourceDocumentId] = { id: item.sourceDocumentId, name: item.name, bytes: item.bytes };
+        importedSources[item.sourceDocumentId] = { id: item.sourceDocumentId, name: item.name, bytes: item.bytes, mimeType: "application/pdf" };
         for (const pageNumber of ranges.flat()) {
           completed += 1;
           setWorkState({ message: `Importing ${item.name}`, progress: (completed / Math.max(1, totalPages)) * 90 });
@@ -2421,7 +2542,7 @@ export function App() {
       const nextMarks = replacePreserveAnnotations
         ? scaleMarksForReplacement(marks, destination, nextPage)
         : marks.filter((mark) => markPageId(mark) !== destination.id);
-      setSourceDocuments((existing) => ({ ...existing, [replaceFile.sourceDocumentId]: { id: replaceFile.sourceDocumentId, name: replaceFile.name, bytes: replaceFile.bytes } }));
+      setSourceDocuments((existing) => ({ ...existing, [replaceFile.sourceDocumentId]: { id: replaceFile.sourceDocumentId, name: replaceFile.name, bytes: replaceFile.bytes, mimeType: "application/pdf" } }));
       commitDocument(nextPages, nextMarks, null, destination.pageNumber, [destination.id]);
       setReplaceFile(null);
       setActivePageDialog(null);
@@ -2436,12 +2557,22 @@ export function App() {
     return Array.from(files).some((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
   }
 
+  function hasDocxFiles(files: FileList) {
+    return Array.from(files).some((file) => file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || file.name.toLowerCase().endsWith(".docx") || file.name.toLowerCase().endsWith(".doc"));
+  }
+
   function handlePagesPanelDragOver(event: ReactDragEvent<HTMLDivElement>) {
-    if (!hasPdfFiles(event.dataTransfer.files)) return;
+    if (!hasPdfFiles(event.dataTransfer.files) && !hasDocxFiles(event.dataTransfer.files)) return;
     event.preventDefault();
   }
 
   async function handlePagesPanelDrop(event: ReactDragEvent<HTMLDivElement>) {
+    const docxFile = Array.from(event.dataTransfer.files).find((file) => file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || file.name.toLowerCase().endsWith(".docx") || file.name.toLowerCase().endsWith(".doc"));
+    if (docxFile) {
+      event.preventDefault();
+      beginDocxImport(docxFile, hasOpenProject ? "append" : "replace");
+      return;
+    }
     const files = Array.from(event.dataTransfer.files).filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
     if (files.length === 0) return;
     event.preventDefault();
@@ -2775,6 +2906,7 @@ export function App() {
       if (existing) return existing;
       const source = sourceDocuments[sourceDocumentId];
       if (!source) return null;
+      if (source.mimeType && source.mimeType !== "application/pdf") return null;
       const loaded = await PDFDocument.load(source.bytes);
       loadedSourcePdfs.set(sourceDocumentId, loaded);
       return loaded;
@@ -3124,6 +3256,7 @@ export function App() {
         onNewProject={startNewProject}
         onOpenProject={() => projectInput.current?.click()}
         onOpen={() => fileInput.current?.click()}
+        onImportDocx={() => docxInput.current?.click()}
         canSaveProject={hasOpenProject}
         onSaveProject={saveProject}
         onSaveProjectAs={saveProjectAs}
@@ -3132,6 +3265,7 @@ export function App() {
       />
       <input className="hidden-file-input" ref={projectInput} type="file" accept=".pproj,application/zip" onChange={handleProjectUpload} aria-label="Choose Publish Pro project file" />
       <input className="hidden-file-input" ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
+      <input className="hidden-file-input" ref={docxInput} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleDocxUpload} aria-label="Choose DOCX Word document" />
       <input className="hidden-file-input" ref={importPdfInput} type="file" accept="application/pdf" multiple onChange={handleImportPdf} aria-label="Choose PDFs to import" />
       <input className="hidden-file-input" ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
       <input className="hidden-file-input" ref={projectImageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleProjectImageAssetUpload} aria-label="Choose project image asset" />
@@ -3165,11 +3299,30 @@ export function App() {
               <div className="dialog-actions">
                 <button className="button ghost" onClick={() => setIsProjectDialogOpen(false)}>Cancel</button>
                 <button className="button ghost" onClick={() => createNewProjectFromDraft("pdf")}>Create from PDF</button>
+                <button className="button ghost" onClick={() => { setIsProjectDialogOpen(false); docxInput.current?.click(); }}>Import Word document</button>
                 <button className="button primary" onClick={() => createNewProjectFromDraft("blank")}>Create Empty Project</button>
               </div>
             </div>
           </section>
         </div>
+      ) : null}
+
+      {pendingDocxFile ? (
+        <DocxImportDialog
+          file={pendingDocxFile}
+          mode={docxImportMode}
+          options={docxImportOptions}
+          hasOpenProject={hasOpenProject}
+          isBusy={isBusy}
+          onModeChange={setDocxImportMode}
+          onOptionsChange={setDocxImportOptions}
+          onCancel={() => setPendingDocxFile(null)}
+          onImport={() => void confirmDocxImport()}
+        />
+      ) : null}
+
+      {docxImportReport ? (
+        <DocxImportReportDialog report={docxImportReport} onClose={() => setDocxImportReport(null)} />
       ) : null}
 
       {pageContextMenu ? (
@@ -3573,6 +3726,7 @@ export function App() {
                   <button className="button primary" onClick={saveProject} disabled={isBusy || !hasOpenProject}>Save</button>
                 </div>
                 <ToolCard icon={<Files />} title="Open PDF" description="Open a PDF as the working document." onClick={() => fileInput.current?.click()} />
+                <ToolCard icon={<Files />} title="Import Word document" description="Convert DOCX content into Publish Pro pages while preserving the source file." onClick={() => docxInput.current?.click()} />
                 <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => importPdfInput.current?.click()} />
                 <ToolCard icon={<ImageIcon />} title="Add image asset" description="Import image artwork for publishing marks without placing it on a page." onClick={() => startProjectImageAssetImport({ kind: "projectAssets" })} />
                 <ToolCard icon={<PenLine />} title="Add signature asset" description="Add a local transparent PNG signature." onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} />
@@ -3904,6 +4058,11 @@ export function App() {
                 void openProjectFile(projectFile);
                 return;
               }
+              const docxFile = files.find((file) => file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || file.name.toLowerCase().endsWith(".docx") || file.name.toLowerCase().endsWith(".doc"));
+              if (docxFile) {
+                beginDocxImport(docxFile, hasOpenProject ? "append" : "replace");
+                return;
+              }
               const pdfFiles = files.filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
               const file = pdfFiles[0];
               if (!file) return;
@@ -3923,6 +4082,7 @@ export function App() {
                 onNewProject={startNewProject}
                 onOpenProject={() => projectInput.current?.click()}
                 onOpenPdf={() => fileInput.current?.click()}
+                onOpenDocx={() => docxInput.current?.click()}
                 onOpenRecent={reopenRecentProject}
                 onRemoveRecent={(id) => {
                   removeRecentProject(id);
@@ -5911,11 +6071,132 @@ type WelcomeScreenProps = {
   onNewProject: () => void;
   onOpenProject: () => void;
   onOpenPdf: () => void;
+  onOpenDocx: () => void;
   onOpenRecent: (project: RecentProject) => void;
   onRemoveRecent: (id: string) => void;
   onClearRecent: () => void;
   onRestoreAutosave: () => void;
 };
+
+function DocxImportDialog({
+  file,
+  mode,
+  options,
+  hasOpenProject,
+  isBusy,
+  onModeChange,
+  onOptionsChange,
+  onCancel,
+  onImport,
+}: {
+  file: File;
+  mode: "replace" | "append";
+  options: DocxImportOptions;
+  hasOpenProject: boolean;
+  isBusy: boolean;
+  onModeChange: (mode: "replace" | "append") => void;
+  onOptionsChange: (options: DocxImportOptions) => void;
+  onCancel: () => void;
+  onImport: () => void;
+}) {
+  const update = (patch: Partial<DocxImportOptions>) => onOptionsChange({ ...options, ...patch });
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="docx-import-title">
+        <div className="modal-header">
+          <h2 id="docx-import-title">Import Word document</h2>
+          <button className="panel-icon-button" onClick={onCancel} aria-label="Close Word import dialog" title="Close dialog">x</button>
+        </div>
+        <div className="dialog-body">
+          <p className="dialog-note">
+            Publish Pro converts this DOCX into editable project pages. The original Word file can be preserved inside the project for traceability.
+          </p>
+          <div className="import-summary">
+            <strong>{file.name}</strong>
+            <span>{formatAssetSize(file.size)} · DOCX</span>
+          </div>
+          {hasOpenProject ? (
+            <label>
+              Import mode
+              <select value={mode} onChange={(event) => onModeChange(event.currentTarget.value as "replace" | "append")}>
+                <option value="append">Append to current project</option>
+                <option value="replace">Create new project from Word document</option>
+              </select>
+            </label>
+          ) : null}
+          <div className="checkbox-stack">
+            <label className="checkbox-row"><input type="checkbox" checked={options.preserveSource} onChange={(event) => update({ preserveSource: event.currentTarget.checked })} />Preserve original DOCX in project sources</label>
+            <label className="checkbox-row"><input type="checkbox" checked={options.createBookmarks} onChange={(event) => update({ createBookmarks: event.currentTarget.checked })} />Create bookmarks from Word headings</label>
+            <label className="checkbox-row"><input type="checkbox" checked={options.importHeadersFooters} onChange={(event) => update({ importHeadersFooters: event.currentTarget.checked })} />Import simple headers and footers as publishing settings</label>
+            <label className="checkbox-row"><input type="checkbox" checked={options.importHyperlinks} onChange={(event) => update({ importHyperlinks: event.currentTarget.checked })} />Preserve hyperlink text styling</label>
+          </div>
+          <div className="page-field-grid">
+            <label>
+              Fallback page size
+              <select value={options.fallbackPageSize} onChange={(event) => update({ fallbackPageSize: event.currentTarget.value as DocxImportOptions["fallbackPageSize"] })}>
+                <option value="a4">A4</option>
+                <option value="letter">Letter</option>
+                <option value="legal">Legal</option>
+              </select>
+            </label>
+            <label>
+              Fallback font
+              <select value={options.fallbackFont} onChange={(event) => update({ fallbackFont: event.currentTarget.value as DocxImportOptions["fallbackFont"] })}>
+                <option value="Helvetica">Helvetica</option>
+                <option value="Times Roman">Times Roman</option>
+                <option value="Courier">Courier</option>
+              </select>
+            </label>
+          </div>
+          <p className="dialog-note">This first phase imports Office Open XML content locally in the browser. Legacy `.doc` files are not supported.</p>
+          <div className="dialog-actions">
+            <button className="button ghost" onClick={onCancel} disabled={isBusy}>Cancel</button>
+            <button className="button primary" onClick={onImport} disabled={isBusy}>Import Word document</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DocxImportReportDialog({ report, onClose }: { report: DocxImportReport; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="docx-report-title">
+        <div className="modal-header">
+          <h2 id="docx-report-title">Word import report</h2>
+          <button className="panel-icon-button" onClick={onClose} aria-label="Close Word import report" title="Close report">x</button>
+        </div>
+        <div className="dialog-body">
+          <div className="project-stats-grid">
+            <div><strong>{report.pagesCreated}</strong><span>Pages</span></div>
+            <div><strong>{report.headingsFound}</strong><span>Headings</span></div>
+            <div><strong>{report.bookmarksCreated}</strong><span>Bookmarks</span></div>
+            <div><strong>{report.imagesImported}</strong><span>Images</span></div>
+            <div><strong>{report.tablesImported}</strong><span>Tables</span></div>
+            <div><strong>{report.listsImported}</strong><span>Lists</span></div>
+          </div>
+          {report.warnings.length > 0 ? (
+            <div className="validation-list">
+              <strong>Import warnings</strong>
+              {report.warnings.map((warning, index) => (
+                <div className="validation-row warning" key={`${warning.code}-${index}`}>
+                  <AlertTriangle size={15} />
+                  <span>{warning.message}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="dialog-note">Import completed without warnings.</p>
+          )}
+          <div className="dialog-actions">
+            <button className="button primary" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
 
 const publishingZoneOptions: Array<{ value: PublishingZone; label: string }> = [
   { value: "headerLeft", label: "Header left" },
@@ -6149,6 +6430,7 @@ function WelcomeScreen({
   onNewProject,
   onOpenProject,
   onOpenPdf,
+  onOpenDocx,
   onOpenRecent,
   onRemoveRecent,
   onClearRecent,
@@ -6174,6 +6456,9 @@ function WelcomeScreen({
         <button className="button ghost" onClick={onOpenPdf}>
           Open PDF
         </button>
+        <button className="button ghost" onClick={onOpenDocx}>
+          Import Word document
+        </button>
       </div>
       {autosave ? (
         <button className="autosave-banner" onClick={onRestoreAutosave}>
@@ -6183,7 +6468,7 @@ function WelcomeScreen({
       ) : null}
       <div className="welcome-drop-zone">
         <Files size={28} />
-        <strong>Drop a PDF or .pproj file here</strong>
+        <strong>Drop a PDF, DOCX, or .pproj file here</strong>
         <span>Files stay local in your browser.</span>
       </div>
       <div className="recent-projects">
@@ -7419,6 +7704,7 @@ function getProjectFingerprint(
     sources: Object.values(sourceDocuments).map((source) => ({
       id: source.id,
       name: source.name,
+      mimeType: source.mimeType,
       size: source.bytes.byteLength,
     })),
   });

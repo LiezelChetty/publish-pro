@@ -4,7 +4,7 @@ import type { NavigationState } from "../navigation/types";
 export const PROJECT_FORMAT = "publish-pro-project";
 export const PROJECT_FORMAT_VERSION = 2;
 
-export type ProjectAssetType = "source-pdf" | "image" | "signature" | "other";
+export type ProjectAssetType = "source-pdf" | "source-docx" | "image" | "signature" | "other";
 export type ProjectAssetStatus = "available" | "missing" | "invalid";
 
 export type ProjectMetadata = {
