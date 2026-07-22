@@ -1,4 +1,5 @@
 import { collectProjectAssets } from "./assets";
+import { migrateProjectManifest } from "./migrations";
 import { assertSupportedManifest, createProjectMetadata, PROJECT_FORMAT, PROJECT_FORMAT_VERSION, type ProjectBundle, type ProjectManifest, type ProjectMetadata } from "./schema";
 import { createZip, readZip } from "./zip";
 
@@ -68,9 +69,9 @@ export function deserializeProject(bytes: Uint8Array): ProjectBundle {
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new Error("Project file is missing manifest.json.");
   const parsed = JSON.parse(decoder.decode(manifestBytes)) as unknown;
-  assertSupportedManifest(parsed);
-  validateProjectAssets(parsed, files);
-  return { manifest: parsed, files };
+  const manifest = migrateProjectManifest(parsed);
+  validateProjectAssets(manifest, files);
+  return { manifest, files };
 }
 
 function validateProjectAssets(manifest: ProjectManifest, files: Record<string, Uint8Array>) {

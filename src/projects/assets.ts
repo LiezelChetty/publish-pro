@@ -24,6 +24,7 @@ export type ProjectAssetSummary = ProjectAssetManifest & {
 };
 
 export function collectProjectAssets(sources: Record<string, SourceLike>, pages: PageLike[], marks: MarkLike[]): ProjectAssetSummary[] {
+  const collectedAt = new Date().toISOString();
   const sourceUsage = new Map<string, number>();
   pages.forEach((page) => {
     if (page.sourceDocumentId) sourceUsage.set(page.sourceDocumentId, (sourceUsage.get(page.sourceDocumentId) ?? 0) + 1);
@@ -36,6 +37,8 @@ export function collectProjectAssets(sources: Record<string, SourceLike>, pages:
     path: `sources/${source.id}.pdf`,
     mimeType: "application/pdf",
     size: source.bytes.byteLength,
+    dateAdded: collectedAt,
+    contentHash: quickContentHash(source.bytes),
     usageCount: sourceUsage.get(source.id) ?? 0,
     status: "available" as const,
     firstPageIndex: pages.findIndex((page) => page.sourceDocumentId === source.id),
@@ -50,12 +53,34 @@ export function collectProjectAssets(sources: Record<string, SourceLike>, pages:
       path: `assets/${mark.id}`,
       mimeType: mark.imageMimeType,
       size: estimateDataUrlSize(mark.imageDataUrl ?? ""),
+      dateAdded: collectedAt,
+      contentHash: mark.imageDataUrl ? quickStringHash(mark.imageDataUrl) : undefined,
       usageCount: 1,
       status: "available" as const,
       firstMarkId: mark.id,
     }));
 
   return [...sourceAssets, ...embeddedAssets];
+}
+
+function quickContentHash(bytes: Uint8Array) {
+  let hash = 2166136261;
+  const step = Math.max(1, Math.floor(bytes.byteLength / 4096));
+  for (let index = 0; index < bytes.byteLength; index += step) {
+    hash ^= bytes[index];
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16)}-${bytes.byteLength}`;
+}
+
+function quickStringHash(value: string) {
+  let hash = 2166136261;
+  const step = Math.max(1, Math.floor(value.length / 4096));
+  for (let index = 0; index < value.length; index += step) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16)}-${value.length}`;
 }
 
 export function estimateDataUrlSize(dataUrl: string) {

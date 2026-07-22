@@ -93,7 +93,7 @@ import { createProjectMetadata, type ProjectMetadata } from "./projects/schema";
 import { buildProjectManifest, deserializeProject, serializeProject } from "./projects/serialization";
 import {
   addRecentProject,
-  base64ToUint8,
+  clearRecentProjects,
   clearAutosave,
   inputToMetadataTags,
   loadAutosave,
@@ -292,7 +292,12 @@ export function App() {
   const [isProjectDirty, setIsProjectDirty] = useState(false);
   const [savedProjectFingerprint, setSavedProjectFingerprint] = useState("");
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => loadRecentProjects());
-  const [autosaveCandidate, setAutosaveCandidate] = useState<ProjectAutosave | null>(() => loadAutosave());
+  const [autosaveCandidate, setAutosaveCandidate] = useState<ProjectAutosave | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [lastAutosavedAt, setLastAutosavedAt] = useState<string | null>(null);
+  const [projectStatusMessage, setProjectStatusMessage] = useState("");
+  const [isProjectDialogOpen, setIsProjectDialogOpen] = useState(false);
+  const [newProjectDraft, setNewProjectDraft] = useState(() => createProjectMetadata());
   const [pdfName, setPdfName] = useState("Untitled document");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
@@ -437,13 +442,25 @@ export function App() {
   }
 
   function startNewProject() {
+    setNewProjectDraft(createProjectMetadata("Untitled project"));
+    setIsProjectDialogOpen(true);
+  }
+
+  function createNewProjectFromDraft(mode: "blank" | "pdf") {
     if (hasOpenProject && hasUnsavedChanges && !window.confirm("Close the current project and discard unsaved changes?")) return;
-    const name = "Untitled project";
+    if (mode === "pdf") {
+      setIsProjectDialogOpen(false);
+      fileInput.current?.click();
+      return;
+    }
+    const name = newProjectDraft.name.trim() || "Untitled project";
     const blankPage = createBlankPageView(1, { width: 612, height: 792 });
     setHasOpenProject(true);
     setProjectId(crypto.randomUUID());
-    setProjectMetadata(createProjectMetadata(name));
+    setProjectMetadata({ ...newProjectDraft, name, modifiedAt: new Date().toISOString() });
     setSavedProjectFingerprint("");
+    setLastSavedAt(null);
+    setLastAutosavedAt(null);
     setPdfName(name);
     setPdfBytes(null);
     setPdfDoc(null);
@@ -458,6 +475,8 @@ export function App() {
     setCurrentPage(1);
     setActiveWorkspace("organise");
     setIsProjectDirty(true);
+    setIsProjectDialogOpen(false);
+    setProjectStatusMessage("New project created. Autosave will keep a local recovery copy.");
     setErrorMessage("");
   }
 
@@ -508,7 +527,9 @@ export function App() {
     setSelectedPageIds(selectedIds.length > 0 ? selectedIds : nextPages[0] ? [nextPages[0].id] : []);
     setLastSelectedPageId(selectedIds[0] ?? nextPages[0]?.id ?? null);
     setIsProjectDirty(false);
-    addRecentProject(bytes, bundle.manifest);
+    setLastSavedAt(bundle.manifest.metadata.modifiedAt);
+    setProjectStatusMessage(`Opened ${fileName}.`);
+    await addRecentProject(bundle.manifest, { filename: fileName, origin: "browser-import" });
     setRecentProjects(loadRecentProjects());
   }
 
@@ -520,17 +541,19 @@ export function App() {
     void openProjectFile(file);
   }
 
-  function saveProject() {
+  async function saveProject() {
     try {
       setErrorMessage("");
       const bytes = createProjectFileBytes();
       const manifest = buildProjectManifest(getProjectSnapshotInput());
       const filename = `${sanitizeFilename(projectMetadata.name || "publish-pro-project")}.pproj`;
-      downloadBytes(bytes, filename, "application/vnd.publish-pro.project+zip");
-      addRecentProject(bytes, manifest);
+      const savedViaFileSystem = await saveProjectBytes(bytes, filename);
+      await addRecentProject(manifest, { filename, origin: savedViaFileSystem ? "file-system-access" : "download" });
       setRecentProjects(loadRecentProjects());
-      clearAutosave();
+      await clearAutosave();
       setAutosaveCandidate(null);
+      setLastSavedAt(new Date().toISOString());
+      setProjectStatusMessage(savedViaFileSystem ? "Project saved." : "Project downloaded as a .pproj file.");
       setIsProjectDirty(false);
       setSavedProjectFingerprint(currentProjectFingerprint);
     } catch (error) {
@@ -539,7 +562,7 @@ export function App() {
   }
 
   function saveProjectAs() {
-    saveProject();
+    void saveProject();
   }
 
   function closeProject() {
@@ -559,6 +582,9 @@ export function App() {
     setCurrentPage(1);
     setIsProjectDirty(false);
     setSavedProjectFingerprint("");
+    setLastSavedAt(null);
+    setLastAutosavedAt(null);
+    setProjectStatusMessage("");
     setErrorMessage("");
   }
 
@@ -566,23 +592,15 @@ export function App() {
     if (!autosaveCandidate) return;
     if (hasOpenProject && hasUnsavedChanges && !window.confirm("Restore autosave and discard unsaved changes in the current project?")) return;
     try {
-      void loadProjectBytes(base64ToUint8(autosaveCandidate.dataBase64), `${autosaveCandidate.manifest.metadata.name}.pproj`);
+      void loadProjectBytes(autosaveCandidate.bytes, `${autosaveCandidate.manifest.metadata.name}.pproj`);
+      setProjectStatusMessage(`Restored autosave from ${formatDateTime(autosaveCandidate.savedAt)}.`);
     } catch (error) {
       setErrorMessage(getProjectErrorMessage(error, "restore"));
     }
   }
 
   function reopenRecentProject(project: RecentProject) {
-    if (!project.dataBase64) {
-      setErrorMessage("This recent project is too large to reopen from browser storage. Use Open Project and choose the .pproj file.");
-      return;
-    }
-    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Open this recent project and discard unsaved changes in the current one?")) return;
-    try {
-      void loadProjectBytes(base64ToUint8(project.dataBase64), `${project.name}.pproj`);
-    } catch (error) {
-      setErrorMessage(getProjectErrorMessage(error, "open"));
-    }
+    setErrorMessage(`${project.name} is listed in Recents. Browser security does not allow Publish Pro to reopen a downloaded project file automatically; choose Open Project and select ${project.savedFilename ?? "the .pproj file"}.`);
   }
 
   function updateProjectMetadata(patch: Partial<ProjectMetadata>) {
@@ -659,16 +677,39 @@ export function App() {
   }, [themeMode]);
 
   useEffect(() => {
+    let cancelled = false;
+    loadAutosave()
+      .then((autosave) => {
+        if (cancelled) return;
+        setAutosaveCandidate(autosave);
+        setLastAutosavedAt(autosave?.savedAt ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setProjectStatusMessage("Autosave storage is unavailable in this browser session.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!hasOpenProject) return undefined;
     const timeout = window.setTimeout(() => {
-      try {
-        const bytes = createProjectFileBytes();
-        const manifest = buildProjectManifest(getProjectSnapshotInput());
-        saveAutosave(bytes, manifest);
-        setAutosaveCandidate(loadAutosave());
-      } catch {
-        // Autosave must never interrupt document editing.
-      }
+      void (async () => {
+        try {
+          setProjectStatusMessage("Autosaving locally...");
+          const bytes = createProjectFileBytes();
+          const manifest = buildProjectManifest(getProjectSnapshotInput());
+          const autosave = await saveAutosave(bytes, manifest);
+          await addRecentProject(manifest, { origin: "autosave", autosaveAvailable: true });
+          setAutosaveCandidate(autosave);
+          setLastAutosavedAt(autosave.savedAt);
+          setRecentProjects(loadRecentProjects());
+          setProjectStatusMessage(`Autosaved locally at ${formatDateTime(autosave.savedAt)}.`);
+        } catch {
+          setProjectStatusMessage("Autosave failed. Your current browser session is still active.");
+        }
+      })();
     }, 900);
 
     return () => window.clearTimeout(timeout);
@@ -932,7 +973,11 @@ export function App() {
       setHasOpenProject(true);
       setProjectId(crypto.randomUUID());
       setProjectMetadata(createProjectMetadata(projectName));
+      setSavedProjectFingerprint("");
+      setLastSavedAt(null);
+      setLastAutosavedAt(null);
       setIsProjectDirty(true);
+      setProjectStatusMessage("PDF opened as an untitled project. Use Save Project to create a .pproj file.");
       setPdfName(file.name);
       setPdfBytes(bytes);
       setSourceDocuments({ [sourceId]: { id: sourceId, name: file.name, bytes } });
@@ -951,8 +996,10 @@ export function App() {
 
   function handleUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    if (file) void loadFile(file);
     event.target.value = "";
+    if (!file) return;
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Open this PDF and discard unsaved changes in the current project?")) return;
+    void loadFile(file);
   }
 
   async function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -2351,6 +2398,41 @@ export function App() {
       <input className="hidden-file-input" ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
       <input className="hidden-file-input" ref={signatureInput} type="file" accept="image/png" onChange={handleSignatureUpload} aria-label="Choose PNG signature file" />
 
+      {isProjectDialogOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="new-project-title">
+            <div className="modal-header">
+              <h2 id="new-project-title">New Project</h2>
+              <button className="panel-icon-button" onClick={() => setIsProjectDialogOpen(false)} aria-label="Close new project dialog" title="Close dialog">x</button>
+            </div>
+            <div className="dialog-body">
+              <label>
+                Project name
+                <input value={newProjectDraft.name} onChange={(event) => setNewProjectDraft((draft) => ({ ...draft, name: event.currentTarget.value }))} />
+              </label>
+              <label>
+                Client
+                <input value={newProjectDraft.client} onChange={(event) => setNewProjectDraft((draft) => ({ ...draft, client: event.currentTarget.value }))} />
+              </label>
+              <label>
+                Author
+                <input value={newProjectDraft.author} onChange={(event) => setNewProjectDraft((draft) => ({ ...draft, author: event.currentTarget.value }))} />
+              </label>
+              <label>
+                Description
+                <textarea value={newProjectDraft.description} onChange={(event) => setNewProjectDraft((draft) => ({ ...draft, description: event.currentTarget.value }))} rows={3} />
+              </label>
+              <p className="dialog-note">Metadata can be edited later in Assemble workspace settings.</p>
+              <div className="dialog-actions">
+                <button className="button ghost" onClick={() => setIsProjectDialogOpen(false)}>Cancel</button>
+                <button className="button ghost" onClick={() => createNewProjectFromDraft("pdf")}>Create from PDF</button>
+                <button className="button primary" onClick={() => createNewProjectFromDraft("blank")}>Create Empty Project</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {pageContextMenu ? (
         <div className="page-context-menu" role="menu" style={{ left: pageContextMenu.x, top: pageContextMenu.y }} aria-label="Page actions">
           <button role="menuitem" onClick={() => runPageMenuAction(() => { setActivePageDialog("blank"); })}>Insert Blank Page Before</button>
@@ -2844,6 +2926,11 @@ export function App() {
               {errorMessage}
             </div>
           ) : null}
+          {!errorMessage && projectStatusMessage ? (
+            <div className="status-message project" role="status" aria-live="polite">
+              {projectStatusMessage}
+            </div>
+          ) : null}
 
           <div
             className={`canvas-stage ${isDragging ? "dragging" : ""}`}
@@ -2884,6 +2971,10 @@ export function App() {
                 onRemoveRecent={(id) => {
                   removeRecentProject(id);
                   setRecentProjects(loadRecentProjects());
+                }}
+                onClearRecent={() => {
+                  clearRecentProjects();
+                  setRecentProjects([]);
                 }}
                 onRestoreAutosave={restoreAutosave}
               />
@@ -2978,6 +3069,18 @@ export function App() {
               <div className="property-readout">
                 <span>Source files</span>
                 <strong>{Object.keys(sourceDocuments).length || 1}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Format</span>
+                <strong>.pproj v1</strong>
+              </div>
+              <div className="property-readout">
+                <span>Last saved</span>
+                <strong>{lastSavedAt ? formatDateTime(lastSavedAt) : "Not saved"}</strong>
+              </div>
+              <div className="property-readout">
+                <span>Autosave</span>
+                <strong>{lastAutosavedAt ? formatDateTime(lastAutosavedAt) : "Pending"}</strong>
               </div>
               <label>
                 Project name
@@ -4697,6 +4800,7 @@ type WelcomeScreenProps = {
   onOpenPdf: () => void;
   onOpenRecent: (project: RecentProject) => void;
   onRemoveRecent: (id: string) => void;
+  onClearRecent: () => void;
   onRestoreAutosave: () => void;
 };
 
@@ -4709,6 +4813,7 @@ function WelcomeScreen({
   onOpenPdf,
   onOpenRecent,
   onRemoveRecent,
+  onClearRecent,
   onRestoreAutosave,
 }: WelcomeScreenProps) {
   return (
@@ -4753,7 +4858,7 @@ function WelcomeScreen({
             <div className="recent-project-row" key={project.id}>
               <button onClick={() => onOpenRecent(project)}>
                 <strong>{project.name}</strong>
-                <span>{project.pageCount} pages · {formatDateTime(project.lastOpenedAt)}{project.sourceName ? ` · ${project.sourceName}` : ""}</span>
+                <span>{project.pageCount} pages · {formatDateTime(project.lastOpenedAt)}{project.savedFilename ? ` · ${project.savedFilename}` : ""}{project.autosaveAvailable ? " · autosave available" : ""}</span>
               </button>
               <button className="link-button" onClick={() => onRemoveRecent(project.id)} aria-label={`Remove ${project.name} from recent projects`}>
                 Remove
@@ -4763,6 +4868,11 @@ function WelcomeScreen({
         ) : (
           <p className="muted-text">Recent projects appear here after you save or open a `.pproj` file.</p>
         )}
+        {recentProjects.length > 0 ? (
+          <button className="link-button recent-clear" onClick={onClearRecent}>
+            Clear recent-project history
+          </button>
+        ) : null}
       </div>
     </section>
   );
@@ -5816,6 +5926,40 @@ function downloadBytes(bytes: Uint8Array, filename: string, mimeType: string) {
   anchor.click();
   URL.revokeObjectURL(url);
 }
+
+async function saveProjectBytes(bytes: Uint8Array, filename: string) {
+  const picker = (window as Window & { showSaveFilePicker?: (options: unknown) => Promise<FileSystemWritableFileHandle> }).showSaveFilePicker;
+  if (picker) {
+    try {
+      const handle = await picker({
+        suggestedName: filename,
+        types: [
+          {
+            description: "Publish Pro Project",
+            accept: { "application/vnd.publish-pro.project+zip": [".pproj"] },
+          },
+        ],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(new Blob([bytes.buffer as ArrayBuffer], { type: "application/vnd.publish-pro.project+zip" }));
+      await writable.close();
+      return true;
+    } catch {
+      downloadBytes(bytes, filename, "application/vnd.publish-pro.project+zip");
+      return false;
+    }
+  }
+
+  downloadBytes(bytes, filename, "application/vnd.publish-pro.project+zip");
+  return false;
+}
+
+type FileSystemWritableFileHandle = {
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>;
+    close: () => Promise<void>;
+  }>;
+};
 
 function sanitizeFilename(value: string) {
   return (value.trim() || "publish-pro-project").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").slice(0, 120);

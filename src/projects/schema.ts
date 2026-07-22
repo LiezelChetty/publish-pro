@@ -21,6 +21,8 @@ export type ProjectAssetManifest = {
   path: string;
   mimeType?: string;
   size: number;
+  dateAdded: string;
+  contentHash?: string;
   usageCount: number;
   status: ProjectAssetStatus;
 };
