@@ -1,4 +1,5 @@
 import type { PublishingSettings } from "../publishing/types";
+import type { NavigationState } from "../navigation/types";
 
 export const PROJECT_FORMAT = "publish-pro-project";
 export const PROJECT_FORMAT_VERSION = 2;
@@ -51,6 +52,7 @@ export type ProjectManifest = {
   pages: unknown[];
   annotations: unknown[];
   publishingSettings: PublishingSettings;
+  navigation?: NavigationState;
   sources: ProjectAssetManifest[];
   assets: ProjectAssetManifest[];
 };

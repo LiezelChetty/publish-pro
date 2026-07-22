@@ -4511,6 +4511,100 @@ nav.left-nav.workspace-nav .workspace-button {
   font-size: 12px;
 }
 
+.bookmark-tree-panel,
+.navigation-preview-list {
+  display: grid;
+  gap: 6px;
+}
+
+.bookmark-tree-row,
+.navigation-preview-row {
+  align-items: center;
+  border-radius: 8px;
+  color: #1f2937;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 36px;
+  padding-bottom: 6px;
+  padding-right: 8px;
+  padding-top: 6px;
+}
+
+.bookmark-tree-row:hover,
+.navigation-preview-row:hover {
+  background: rgb(241 245 249 / 0.95);
+}
+
+.bookmark-tree-row.active,
+.navigation-preview-row.active {
+  background: rgb(239 68 68 / 0.1);
+}
+
+.bookmark-tree-row.broken {
+  outline: 1px solid rgb(201 47 39 / 0.32);
+}
+
+.bookmark-title-button,
+.navigation-preview-row {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+  text-align: left;
+}
+
+.bookmark-title-button {
+  align-items: center;
+  display: grid;
+  gap: 2px 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 0;
+}
+
+.bookmark-title-button span,
+.navigation-preview-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmark-title-button small,
+.navigation-preview-row small {
+  color: #64748b;
+  font-size: 12px;
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmark-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  grid-column: 1 / -1;
+  padding-left: 24px;
+}
+
+.bookmark-row-actions button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 11px;
+  min-height: 24px;
+  padding: 2px 6px;
+}
+
+.bookmark-row-actions button:hover {
+  background: rgb(241 245 249 / 0.95);
+  color: #1f2937;
+}
+
 .recent-project-row {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -4822,6 +4916,29 @@ nav.left-nav.workspace-nav .workspace-button {
 :root[data-theme="dark"] .publishing-section summary,
 :root[data-theme="dark"] .preset-row strong {
   color: #f8fafc;
+}
+
+:root[data-theme="dark"] .bookmark-tree-row,
+:root[data-theme="dark"] .navigation-preview-row {
+  color: #f8fafc;
+}
+
+:root[data-theme="dark"] .bookmark-title-button small,
+:root[data-theme="dark"] .navigation-preview-row small,
+:root[data-theme="dark"] .bookmark-row-actions button {
+  color: #94a3b8;
+}
+
+:root[data-theme="dark"] .bookmark-tree-row:hover,
+:root[data-theme="dark"] .navigation-preview-row:hover,
+:root[data-theme="dark"] .bookmark-row-actions button:hover {
+  background: rgb(51 65 85 / 0.72);
+  color: #f8fafc;
+}
+
+:root[data-theme="dark"] .bookmark-tree-row.active,
+:root[data-theme="dark"] .navigation-preview-row.active {
+  background: rgb(239 68 68 / 0.18);
 }
 
 :root[data-theme="dark"] .publishing-section label,

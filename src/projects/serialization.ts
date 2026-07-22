@@ -1,6 +1,7 @@
 import { collectProjectAssets, type ProjectImageAssetLike } from "./assets";
 import { createDefaultPublishingSettings } from "../publishing/defaults";
 import type { PublishingSettings } from "../publishing/types";
+import type { NavigationState } from "../navigation/types";
 import { migrateProjectManifest } from "./migrations";
 import { assertSupportedManifest, createProjectMetadata, PROJECT_FORMAT, PROJECT_FORMAT_VERSION, type ProjectBundle, type ProjectManifest, type ProjectMetadata } from "./schema";
 import { createZip, readZip } from "./zip";
@@ -20,6 +21,7 @@ type CreateProjectInput = {
   annotations: unknown[];
   projectImageAssets?: ProjectImageAssetLike[];
   publishingSettings?: PublishingSettings;
+  navigation?: NavigationState;
   sourceDocuments: Record<string, SourceLike>;
   workspaceState: ProjectManifest["workspaceState"];
   exportSettings: ProjectManifest["exportSettings"];
@@ -50,6 +52,7 @@ export function buildProjectManifest(input: CreateProjectInput): ProjectManifest
     pages: input.pages,
     annotations: input.annotations,
     publishingSettings: input.publishingSettings ?? createDefaultPublishingSettings(),
+    navigation: input.navigation,
     sources: allAssets.filter((asset) => asset.type === "source-pdf"),
     assets: allAssets.filter((asset) => asset.type !== "source-pdf"),
   };

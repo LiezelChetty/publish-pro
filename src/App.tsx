@@ -1,8 +1,11 @@
 import {
   BookOpen,
   CheckCircle2,
+  AlertTriangle,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Download,
   FilePlus2,
   Files,
@@ -97,6 +100,24 @@ import type { HeaderFooterZone, HeaderFooterZoneImage, PublishingNumberFormat, P
 import { collectProjectAssets, estimateDataUrlSize, formatAssetSize, type ProjectImageAssetLike } from "./projects/assets";
 import { createProjectMetadata, type ProjectMetadata } from "./projects/schema";
 import { buildProjectManifest, deserializeProject, serializeProject } from "./projects/serialization";
+import {
+  createBookmark,
+  createDefaultTocSettings,
+  deleteBookmark,
+  duplicateBookmarkTree,
+  getBookmarkDescendants,
+  getBookmarkLevel,
+  getVisibleBookmarkTree,
+  moveBookmark,
+  nestBookmark,
+  normalizeBookmarks,
+  outdentBookmark,
+  wouldCreateBookmarkCycle,
+} from "./navigation/bookmarks";
+import { addPdfOutline, addTocLinks } from "./navigation/pdfOutline";
+import { buildTocEntries, getTocPageSize, layoutToc } from "./navigation/toc";
+import { validateNavigation } from "./navigation/validation";
+import type { DocumentBookmark, NavigationState, PageReference, TocGeneratedPageMetadata, TocLayoutResult, TocManualEntry, TocSettings } from "./navigation/types";
 import {
   addRecentProject,
   clearRecentProjects,
@@ -208,6 +229,11 @@ type HistoryState = {
   future: HistoryEntry[];
 };
 
+type NavigationHistoryState = {
+  past: NavigationState[];
+  future: NavigationState[];
+};
+
 type PageView = {
   id: string;
   pageNumber: number;
@@ -218,6 +244,7 @@ type PageView = {
   rotation: number;
   label?: string;
   isBlank?: boolean;
+  generatedToc?: boolean;
   background?: string;
   imageUrl: string;
   textItems: TextItemView[];
@@ -331,6 +358,12 @@ export function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [marks, setMarks] = useState<Mark[]>(initialMarks);
   const [history, setHistory] = useState<HistoryState>({ past: [], future: [] });
+  const [bookmarks, setBookmarks] = useState<DocumentBookmark[]>([]);
+  const [selectedBookmarkId, setSelectedBookmarkId] = useState<string | null>(null);
+  const [tocSettings, setTocSettings] = useState<TocSettings>(createDefaultTocSettings());
+  const [manualTocEntries, setManualTocEntries] = useState<TocManualEntry[]>([]);
+  const [generatedToc, setGeneratedToc] = useState<TocGeneratedPageMetadata | undefined>(undefined);
+  const [navigationHistory, setNavigationHistory] = useState<NavigationHistoryState>({ past: [], future: [] });
   const [activeTool, setActiveTool] = useState<Tool>("select");
   const [penColor, setPenColor] = useState("#111827");
   const [penWidth, setPenWidth] = useState(4);
@@ -414,8 +447,8 @@ export function App() {
     [marks, projectImageAssets]
   );
   const currentProjectFingerprint = useMemo(
-    () => getProjectFingerprint(projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings, projectImageAssets),
-    [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings, projectImageAssets]
+    () => getProjectFingerprint(projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings, projectImageAssets, getNavigationSnapshot()),
+    [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings, projectImageAssets, bookmarks, tocSettings, manualTocEntries, generatedToc]
   );
   const hasUnsavedChanges = hasOpenProject && (isProjectDirty || currentProjectFingerprint !== savedProjectFingerprint);
   const visibleComments = comments.filter((mark) => {
@@ -423,13 +456,23 @@ export function App() {
     return (showAllComments || mark.page === currentPage) && commentMatchesFilter(mark.comment.resolved, commentFilter);
   });
   const isBusy = workState !== null;
-  const canUndo = (history.past.length > 0 || publishingHistory.past.length > 0) && !isBusy;
-  const canRedo = (history.future.length > 0 || publishingHistory.future.length > 0) && !isBusy;
+  const canUndo = (history.past.length > 0 || publishingHistory.past.length > 0 || navigationHistory.past.length > 0) && !isBusy;
+  const canRedo = (history.future.length > 0 || publishingHistory.future.length > 0 || navigationHistory.future.length > 0) && !isBusy;
   const filteredPages = useMemo(() => {
     if (!query.trim()) return pages;
     const normalized = query.trim().toLowerCase();
     return pages.filter((page) => String(page.pageNumber).includes(normalized));
   }, [pages, query]);
+  const pageReferences = useMemo<PageReference[]>(
+    () => pages.map((page) => ({ id: page.id, pageNumber: page.pageNumber, label: page.label, width: page.width, height: page.height })),
+    [pages]
+  );
+  const visibleBookmarks = useMemo(() => getVisibleBookmarkTree(bookmarks), [bookmarks]);
+  const tocEntries = useMemo(() => buildTocEntries(bookmarks, manualTocEntries, pageReferences, tocSettings), [bookmarks, manualTocEntries, pageReferences, tocSettings]);
+  const navigationIssues = useMemo(
+    () => validateNavigation({ bookmarks, manualEntries: manualTocEntries, pages: pageReferences, generatedToc }),
+    [bookmarks, manualTocEntries, pageReferences, generatedToc]
+  );
   const workspaceItems: Array<{ id: WorkspaceMode; icon: ReactElement; title: string; description: string }> = [
     { id: "organise", icon: <FilePlus2 />, title: "Organise", description: "Pages and order" },
     { id: "edit", icon: <TextCursorInput />, title: "Edit", description: "Text, images, signatures" },
@@ -456,6 +499,54 @@ export function App() {
     window.localStorage.setItem(THEME_STORAGE_KEY, mode);
   }
 
+  function getNavigationSnapshot(): NavigationState {
+    return {
+      bookmarks,
+      tocSettings,
+      manualTocEntries,
+      generatedToc,
+    };
+  }
+
+  function resetNavigationState() {
+    setBookmarks([]);
+    setSelectedBookmarkId(null);
+    setTocSettings(createDefaultTocSettings());
+    setManualTocEntries([]);
+    setGeneratedToc(undefined);
+    setNavigationHistory({ past: [], future: [] });
+  }
+
+  function setNavigationFromManifest(navigation?: NavigationState) {
+    setBookmarks(normalizeBookmarks(navigation?.bookmarks ?? []));
+    setSelectedBookmarkId(null);
+    setTocSettings({ ...createDefaultTocSettings(), ...(navigation?.tocSettings ?? {}) });
+    setManualTocEntries(navigation?.manualTocEntries ?? []);
+    setGeneratedToc(navigation?.generatedToc);
+    setNavigationHistory({ past: [], future: [] });
+  }
+
+  function commitNavigation(next: Partial<NavigationState>, markTocStale = true) {
+    const before = getNavigationSnapshot();
+    const hasGeneratedTocPatch = Object.prototype.hasOwnProperty.call(next, "generatedToc");
+    const after: NavigationState = {
+      bookmarks: next.bookmarks ?? bookmarks,
+      tocSettings: next.tocSettings ?? tocSettings,
+      manualTocEntries: next.manualTocEntries ?? manualTocEntries,
+      generatedToc: hasGeneratedTocPatch ? next.generatedToc : markTocStale && generatedToc ? { ...generatedToc, stale: true } : generatedToc,
+    };
+    if (JSON.stringify(before) === JSON.stringify(after)) return;
+    setNavigationHistory((existing) => ({
+      past: [...existing.past.slice(-(MAX_HISTORY_ENTRIES - 1)), before],
+      future: [],
+    }));
+    setBookmarks(normalizeBookmarks(after.bookmarks));
+    setTocSettings(after.tocSettings);
+    setManualTocEntries(after.manualTocEntries);
+    setGeneratedToc(after.generatedToc);
+    setIsProjectDirty(true);
+  }
+
   function getProjectSnapshotInput() {
     return {
       projectId,
@@ -464,6 +555,7 @@ export function App() {
       annotations: marks,
       projectImageAssets,
       publishingSettings,
+      navigation: getNavigationSnapshot(),
       sourceDocuments,
       workspaceState: {
         currentPage,
@@ -510,6 +602,7 @@ export function App() {
     setProjectImageAssets([]);
     setPages([blankPage]);
     setMarks([]);
+    resetNavigationState();
     setPublishingSettings(createDefaultPublishingSettings());
     setPublishingHistory({ past: [], future: [] });
     setHistory({ past: [], future: [] });
@@ -567,11 +660,17 @@ export function App() {
       return assets;
     }, []);
     const firstSource = Object.values(nextSources)[0];
+    const nextNavigation: NavigationState = {
+      bookmarks: normalizeBookmarks(bundle.manifest.navigation?.bookmarks ?? []),
+      tocSettings: { ...createDefaultTocSettings(), ...(bundle.manifest.navigation?.tocSettings ?? {}) },
+      manualTocEntries: bundle.manifest.navigation?.manualTocEntries ?? [],
+      generatedToc: bundle.manifest.navigation?.generatedToc,
+    };
     setHasOpenProject(true);
     setProjectId(bundle.manifest.projectId);
     setProjectMetadata(bundle.manifest.metadata);
     const nextPublishingSettings = mergePublishingSettings(bundle.manifest.publishingSettings);
-    setSavedProjectFingerprint(getProjectFingerprint(bundle.manifest.projectId, bundle.manifest.metadata, nextPages, syncedMarks, nextSources, bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, ""), nextPublishingSettings, nextProjectImageAssets));
+    setSavedProjectFingerprint(getProjectFingerprint(bundle.manifest.projectId, bundle.manifest.metadata, nextPages, syncedMarks, nextSources, bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, ""), nextPublishingSettings, nextProjectImageAssets, nextNavigation));
     setPdfName(bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, ""));
     setPdfBytes(firstSource?.bytes ?? null);
     setPdfDoc(null);
@@ -580,6 +679,7 @@ export function App() {
     setProjectImageAssets(nextProjectImageAssets);
     setPages(nextPages);
     setMarks(syncedMarks);
+    setNavigationFromManifest(nextNavigation);
     setPublishingSettings(nextPublishingSettings);
     setPublishingHistory({ past: [], future: [] });
     setHistory({ past: [], future: [] });
@@ -641,6 +741,7 @@ export function App() {
     setProjectImageAssets([]);
     setPages(demoPages);
     setMarks(initialMarks);
+    resetNavigationState();
     setPublishingSettings(createDefaultPublishingSettings());
     setPublishingHistory({ past: [], future: [] });
     setHistory({ past: [], future: [] });
@@ -1102,6 +1203,10 @@ export function App() {
         setCurrentPage(1);
         setSelectedPageIds(nextPages[0] ? [nextPages[0].id] : []);
         setLastSelectedPageId(nextPages[0]?.id ?? null);
+        const importedBookmarks = await importPdfOutlineBookmarks(activePdf, nextPages);
+        if (importedBookmarks.length > 0) {
+          setBookmarks((existing) => (existing.length > 0 ? existing : importedBookmarks));
+        }
         setWorkState(null);
       } catch (error) {
         if (cancelled) return;
@@ -1176,6 +1281,7 @@ export function App() {
       setActiveSourceDocumentId(sourceId);
       setPdfDoc(loaded);
       setMarks([]);
+      resetNavigationState();
       setPublishingSettings(createDefaultPublishingSettings());
       setPublishingHistory({ past: [], future: [] });
       setHistory({ past: [], future: [] });
@@ -1800,6 +1906,92 @@ export function App() {
     insertBlankPages("end");
   }
 
+  function addBookmarkForPage(page: PageView, parentId?: string) {
+    const bookmark = createBookmark(pageToReference(page), undefined, parentId, bookmarks.filter((item) => item.parentId === parentId).length);
+    commitNavigation({ bookmarks: [...bookmarks, bookmark] });
+    setSelectedBookmarkId(bookmark.id);
+    setLeftPanel("bookmarks");
+  }
+
+  function addBookmarkFromCurrentPage() {
+    const page = pages.find((item) => item.pageNumber === currentPage) ?? pages[0];
+    if (page) addBookmarkForPage(page);
+  }
+
+  function addChildBookmark() {
+    const parent = bookmarks.find((bookmark) => bookmark.id === selectedBookmarkId);
+    const page = parent ? pages.find((item) => item.id === parent.pageId) : pages.find((item) => item.pageNumber === currentPage) ?? pages[0];
+    if (page) addBookmarkForPage(page, parent?.id);
+  }
+
+  function addBookmarksFromSelectedPages() {
+    const activeIds = getActivePageIds();
+    const selectedPages = pages.filter((page) => activeIds.includes(page.id));
+    const nextBookmarks = [
+      ...bookmarks,
+      ...selectedPages.map((page, index) => createBookmark(pageToReference(page), page.label || `Page ${page.pageNumber}`, undefined, bookmarks.filter((item) => !item.parentId).length + index)),
+    ];
+    commitNavigation({ bookmarks: nextBookmarks });
+    setLeftPanel("bookmarks");
+  }
+
+  function addBookmarksFromPageLabels() {
+    const labelledPages = pages.filter((page) => page.label?.trim());
+    const nextBookmarks = [
+      ...bookmarks,
+      ...labelledPages.map((page, index) => createBookmark(pageToReference(page), page.label, undefined, bookmarks.filter((item) => !item.parentId).length + index)),
+    ];
+    commitNavigation({ bookmarks: nextBookmarks });
+    setLeftPanel("bookmarks");
+  }
+
+  function updateBookmark(bookmarkId: string, patch: Partial<DocumentBookmark>) {
+    commitNavigation({
+      bookmarks: bookmarks.map((bookmark) => (bookmark.id === bookmarkId ? { ...bookmark, ...patch, updatedAt: new Date().toISOString() } : bookmark)),
+    });
+  }
+
+  function removeBookmark(bookmarkId: string) {
+    const descendants = getBookmarkDescendants(bookmarks, bookmarkId);
+    const mode = descendants.length > 0 && window.confirm("Promote child bookmarks instead of deleting them? Choose Cancel to delete the whole branch.") ? "promoteChildren" : "deleteChildren";
+    commitNavigation({ bookmarks: deleteBookmark(bookmarks, bookmarkId, mode) });
+    setSelectedBookmarkId(null);
+  }
+
+  function repairBookmarkDestination(bookmarkId: string) {
+    const page = pages.find((item) => item.pageNumber === currentPage) ?? pages[0];
+    if (!page) return;
+    updateBookmark(bookmarkId, { pageId: page.id, y: 0 });
+  }
+
+  function duplicateBookmark(bookmarkId: string) {
+    commitNavigation({ bookmarks: duplicateBookmarkTree(bookmarks, bookmarkId) });
+  }
+
+  function nestSelectedBookmark() {
+    if (!selectedBookmarkId) return;
+    commitNavigation({ bookmarks: nestBookmark(bookmarks, selectedBookmarkId) });
+  }
+
+  function outdentSelectedBookmark() {
+    if (!selectedBookmarkId) return;
+    commitNavigation({ bookmarks: outdentBookmark(bookmarks, selectedBookmarkId) });
+  }
+
+  function moveSelectedBookmark(direction: -1 | 1) {
+    if (!selectedBookmarkId) return;
+    commitNavigation({ bookmarks: moveBookmark(bookmarks, selectedBookmarkId, direction) });
+  }
+
+  function navigateToBookmark(bookmark: DocumentBookmark) {
+    const page = pages.find((item) => item.id === bookmark.pageId);
+    if (!page) return;
+    setCurrentPage(page.pageNumber);
+    setSelectedPageIds([page.id]);
+    setLastSelectedPageId(page.id);
+    setSelectedBookmarkId(bookmark.id);
+  }
+
   function duplicatePage() {
     duplicateSelectedPages();
   }
@@ -1894,6 +2086,61 @@ export function App() {
     commitDocument(nextPages, marks, null, targetIndex + 1, selectedIds);
   }
 
+  function insertOrRegenerateToc() {
+    const layout = layoutToc(tocEntries, pageReferences.filter((page) => !generatedToc?.pageIds.includes(page.id)), tocSettings);
+    const existingTocIds = new Set(generatedToc?.pageIds ?? []);
+    const pagesWithoutOldToc = pages.filter((page) => !existingTocIds.has(page.id));
+    const insertIndex = getTocInsertionIndex(pagesWithoutOldToc);
+    const tocPageSize = getTocPageSize(tocSettings.pageSize);
+    const tocPages: PageView[] = layout.pages.map((tocPage, index) => ({
+      ...createBlankPageView(0, tocPageSize, index === 0 ? tocSettings.title : `${tocSettings.title} ${index + 1}`),
+      id: tocPage.id,
+      generatedToc: true,
+      imageUrl: createTocPreviewDataUrl(layout, tocPage.id, tocSettings),
+    }));
+    const nextPages = renumberPages([...pagesWithoutOldToc.slice(0, insertIndex), ...tocPages, ...pagesWithoutOldToc.slice(insertIndex)]);
+    const nextGeneratedToc: TocGeneratedPageMetadata = {
+      pageIds: tocPages.map((page) => page.id),
+      insertedAtPageId: nextPages[Math.min(insertIndex + tocPages.length, nextPages.length - 1)]?.id,
+      generatedAt: new Date().toISOString(),
+      stale: false,
+    };
+    commitDocument(nextPages, marks, selectedMark, insertIndex + 1, tocPages.map((page) => page.id), pages, marks);
+    commitNavigation({ generatedToc: nextGeneratedToc }, false);
+  }
+
+  function removeGeneratedToc() {
+    if (!generatedToc?.pageIds.length) return;
+    const tocIds = new Set(generatedToc.pageIds);
+    const remainingPages = pages.filter((page) => !tocIds.has(page.id));
+    const nextPages = renumberPages(remainingPages.length > 0 ? remainingPages : [createBlankPageView(1, getBlankPageSize("letterPortrait"), "Blank")]);
+    commitDocument(nextPages, marks, null, Math.min(currentPage, nextPages.length), nextPages[0] ? [nextPages[0].id] : []);
+    commitNavigation({ generatedToc: undefined }, false);
+  }
+
+  function addManualTocEntry() {
+    const page = pages.find((item) => item.pageNumber === currentPage) ?? pages[0];
+    if (!page) return;
+    const now = new Date().toISOString();
+    const entry: TocManualEntry = {
+      id: crypto.randomUUID(),
+      title: page.label || `Page ${page.pageNumber}`,
+      pageId: page.id,
+      level: 1,
+      order: manualTocEntries.length,
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    commitNavigation({ manualTocEntries: [...manualTocEntries, entry] });
+  }
+
+  function updateManualTocEntry(entryId: string, patch: Partial<TocManualEntry>) {
+    commitNavigation({
+      manualTocEntries: manualTocEntries.map((entry) => (entry.id === entryId ? { ...entry, ...patch, updatedAt: new Date().toISOString() } : entry)),
+    });
+  }
+
   function getPageInsertionIndex(position: InsertPosition) {
     if (position === "start") return 0;
     if (position === "end") return pages.length;
@@ -1901,6 +2148,13 @@ export function App() {
     const indexes = pages.map((page, index) => (activeIds.includes(page.id) ? index : -1)).filter((index) => index >= 0);
     if (indexes.length === 0) return position === "before" ? currentPage - 1 : currentPage;
     return position === "before" ? Math.min(...indexes) : Math.max(...indexes) + 1;
+  }
+
+  function getTocInsertionIndex(candidatePages = pages) {
+    if (tocSettings.insertPosition === "beforeFirst") return 0;
+    const activeIds = getActivePageIds();
+    const indexes = candidatePages.map((page, index) => (activeIds.includes(page.id) ? index : -1)).filter((index) => index >= 0);
+    return indexes.length > 0 ? Math.max(...indexes) + 1 : Math.min(currentPage, candidatePages.length);
   }
 
   async function handleImportPdf(event: ChangeEvent<HTMLInputElement>) {
@@ -2327,6 +2581,22 @@ export function App() {
   }
 
   function undo() {
+    if (history.past.length === 0 && publishingHistory.past.length === 0 && navigationHistory.past.length > 0) {
+      setNavigationHistory((existing) => {
+        const previous = existing.past[existing.past.length - 1];
+        if (!previous) return existing;
+        const current = getNavigationSnapshot();
+        setBookmarks(previous.bookmarks);
+        setTocSettings(previous.tocSettings);
+        setManualTocEntries(previous.manualTocEntries);
+        setGeneratedToc(previous.generatedToc);
+        return {
+          past: existing.past.slice(0, -1),
+          future: [current, ...existing.future],
+        };
+      });
+      return;
+    }
     if (history.past.length === 0 && publishingHistory.past.length > 0) {
       setPublishingHistory((existing) => {
         const previous = existing.past[existing.past.length - 1];
@@ -2358,6 +2628,22 @@ export function App() {
   }
 
   function redo() {
+    if (history.future.length === 0 && publishingHistory.future.length === 0 && navigationHistory.future.length > 0) {
+      setNavigationHistory((existing) => {
+        const next = existing.future[0];
+        if (!next) return existing;
+        const current = getNavigationSnapshot();
+        setBookmarks(next.bookmarks);
+        setTocSettings(next.tocSettings);
+        setManualTocEntries(next.manualTocEntries);
+        setGeneratedToc(next.generatedToc);
+        return {
+          past: [...existing.past, current].slice(-MAX_HISTORY_ENTRIES),
+          future: existing.future.slice(1),
+        };
+      });
+      return;
+    }
     if (history.future.length === 0 && publishingHistory.future.length > 0) {
       setPublishingHistory((existing) => {
         const next = existing.future[0];
@@ -2456,6 +2742,10 @@ export function App() {
     });
 
     const pageIdToExportIndex = new Map(exportPages.map((page, index) => [page.id, index]));
+    const tocExport = await drawGeneratedTocToPdf(exportedPdf, exportPages, pageIdToExportIndex);
+    if (tocExport.lines.length > 0) {
+      addTocLinks(exportedPdf, tocExport.tocPages, exportedPdf.getPages(), tocExport.lines, pageIdToExportIndex);
+    }
     for (const [index, mark] of exportMarks.entries()) {
       onProgress?.("Applying annotations", 30 + (index / Math.max(1, exportMarks.length)) * 55);
       const exportPageId = markPageId(mark, exportPages);
@@ -2651,7 +2941,69 @@ export function App() {
     });
 
     appendCommentsSummary(exportedPdf, helvetica, helveticaBold, exportMarks.filter((mark) => mark.kind === "comment" && mark.comment));
+    addPdfOutline(exportedPdf, bookmarks, pageIdToExportIndex);
     return exportedPdf;
+  }
+
+  async function drawGeneratedTocToPdf(pdf: PDFDocument, exportPages: PageView[], pageIdToExportIndex: Map<string, number>) {
+    const tocPageViews = exportPages.filter((page) => page.generatedToc);
+    if (tocPageViews.length === 0) return { tocPages: [], lines: [] };
+    const nonTocPages = exportPages.filter((page) => !page.generatedToc).map(pageToReference);
+    const layout = layoutToc(buildTocEntries(bookmarks, manualTocEntries, nonTocPages, tocSettings), nonTocPages, tocSettings);
+    const font = await pdf.embedFont(getTocStandardFontName(tocSettings.fontFamily, false));
+    const boldFont = await pdf.embedFont(getTocStandardFontName(tocSettings.fontFamily, true));
+    const tocPages = tocPageViews
+      .map((page) => pageIdToExportIndex.get(page.id))
+      .filter((index): index is number => index !== undefined)
+      .map((index) => pdf.getPage(index));
+    tocPages.forEach((page, index) => {
+      page.drawText(index === 0 ? tocSettings.title : `${tocSettings.title} ${index + 1}`, {
+        x: tocSettings.marginLeft,
+        y: page.getHeight() - tocSettings.marginTop + tocSettings.fontSize * 0.6,
+        size: tocSettings.fontSize * 1.7,
+        font: boldFont,
+        color: colorToRgb(tocSettings.color),
+      });
+    });
+    for (const line of layout.pages.flatMap((page) => page.lines)) {
+      const page = tocPages[line.pageIndex];
+      if (!page) continue;
+      const isBold = tocSettings.boldLevels.includes(line.level);
+      const fontToUse = isBold ? boldFont : font;
+      const y = line.y;
+      page.drawText(line.text, {
+        x: line.x,
+        y,
+        size: tocSettings.fontSize,
+        font: fontToUse,
+        color: colorToRgb(tocSettings.color),
+      });
+      if (line.pageText) {
+        const pageTextWidth = font.widthOfTextAtSize(line.pageText, tocSettings.fontSize);
+        const pageTextX = page.getWidth() - tocSettings.marginRight - pageTextWidth;
+        if (tocSettings.dotLeaders) {
+          const leaderStart = line.x + fontToUse.widthOfTextAtSize(line.text, tocSettings.fontSize) + 8;
+          const leaderEnd = pageTextX - 8;
+          if (leaderEnd > leaderStart) {
+            page.drawLine({
+              start: { x: leaderStart, y: y + 2 },
+              end: { x: leaderEnd, y: y + 2 },
+              thickness: 0.35,
+              color: colorToRgb("#9ca3af"),
+              dashArray: [1, 3],
+            });
+          }
+        }
+        page.drawText(line.pageText, {
+          x: pageTextX,
+          y,
+          size: tocSettings.fontSize,
+          font,
+          color: colorToRgb(tocSettings.color),
+        });
+      }
+    }
+    return { tocPages, lines: layout.pages.flatMap((page) => page.lines) };
   }
 
   useEffect(() => {
@@ -3155,6 +3507,61 @@ export function App() {
                 <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => importPdfInput.current?.click()} />
                 <ToolCard icon={<ImageIcon />} title="Add image asset" description="Import image artwork for publishing marks without placing it on a page." onClick={() => startProjectImageAssetImport({ kind: "projectAssets" })} />
                 <ToolCard icon={<PenLine />} title="Add signature asset" description="Add a local transparent PNG signature." onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} />
+                <details className="publishing-section" open>
+                  <summary>Bookmarks</summary>
+                  <div className="project-quick-actions">
+                    <button className="button ghost" onClick={addBookmarkFromCurrentPage} disabled={isBusy}>Current page</button>
+                    <button className="button ghost" onClick={addChildBookmark} disabled={isBusy || !selectedBookmarkId}>Add child</button>
+                    <button className="button ghost" onClick={addBookmarksFromSelectedPages} disabled={isBusy}>Selected pages</button>
+                  </div>
+                  <button className="button ghost full-width" onClick={addBookmarksFromPageLabels} disabled={isBusy}>Create from page labels</button>
+                  <div className="navigation-preview-list" role="tree" aria-label="Bookmark hierarchy">
+                    {visibleBookmarks.length > 0 ? visibleBookmarks.slice(0, 8).map((bookmark) => {
+                      const issue = navigationIssues.find((item) => item.bookmarkId === bookmark.id);
+                      return (
+                        <button key={bookmark.id} className={`navigation-preview-row ${selectedBookmarkId === bookmark.id ? "active" : ""}`} style={{ paddingLeft: 8 + (bookmark.level - 1) * 14 }} onClick={() => navigateToBookmark(bookmark)} role="treeitem" aria-level={bookmark.level}>
+                          {issue ? <AlertTriangle size={14} aria-hidden="true" /> : <BookOpen size={14} aria-hidden="true" />}
+                          <span>{bookmark.title}</span>
+                          <small>{formatBookmarkDestination(bookmark, pages)}</small>
+                        </button>
+                      );
+                    }) : <p className="muted-text">No bookmarks yet.</p>}
+                  </div>
+                </details>
+                <details className="publishing-section">
+                  <summary>Table of Contents</summary>
+                  <label>Title<input value={tocSettings.title} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, title: event.currentTarget.value } })} /></label>
+                  <div className="page-field-grid">
+                    <label>Source<select value={tocSettings.source} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, source: event.currentTarget.value as TocSettings["source"] } })}><option value="bookmarks">Bookmarks</option><option value="pageLabels">Page labels</option><option value="manual">Manual entries</option></select></label>
+                    <label>Max depth<input type="number" min="1" max="8" value={tocSettings.maxDepth} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, maxDepth: clamp(Number(event.currentTarget.value) || 1, 1, 8) } })} /></label>
+                  </div>
+                  <div className="page-field-grid">
+                    <label>Font<select value={tocSettings.fontFamily} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, fontFamily: event.currentTarget.value as TocSettings["fontFamily"] } })}><option value="Helvetica">Helvetica</option><option value="Times Roman">Times Roman</option><option value="Courier">Courier</option></select></label>
+                    <label>Size<input type="number" min="8" max="18" value={tocSettings.fontSize} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, fontSize: clamp(Number(event.currentTarget.value) || 11, 8, 18) } })} /></label>
+                  </div>
+                  <label>Insert<select value={tocSettings.insertPosition} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, insertPosition: event.currentTarget.value as TocSettings["insertPosition"] } })}><option value="beforeFirst">Before first page</option><option value="afterSelected">After selected page</option></select></label>
+                  <label className="checkbox-row"><input type="checkbox" checked={tocSettings.dotLeaders} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, dotLeaders: event.currentTarget.checked } })} />Dot leaders</label>
+                  <label className="checkbox-row"><input type="checkbox" checked={tocSettings.includePageLabels} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, includePageLabels: event.currentTarget.checked } })} />Prefer page labels</label>
+                  <label className="checkbox-row"><input type="checkbox" checked={tocSettings.includeTocInNumbering} onChange={(event) => commitNavigation({ tocSettings: { ...tocSettings, includeTocInNumbering: event.currentTarget.checked } })} />Include TOC pages in numbering</label>
+                  <div className="project-quick-actions">
+                    <button className="button primary" onClick={insertOrRegenerateToc} disabled={isBusy || tocEntries.length === 0}>{generatedToc?.pageIds.length ? "Regenerate TOC" : "Insert TOC"}</button>
+                    <button className="button ghost" onClick={removeGeneratedToc} disabled={isBusy || !generatedToc?.pageIds.length}>Remove TOC</button>
+                  </div>
+                  <button className="button ghost full-width" onClick={addManualTocEntry} disabled={isBusy}>Add manual entry for current page</button>
+                  {manualTocEntries.map((entry) => (
+                    <div className="asset-row" key={entry.id}>
+                      <span className="asset-type">manual toc</span>
+                      <input value={entry.title} onChange={(event) => updateManualTocEntry(entry.id, { title: event.currentTarget.value })} aria-label="Manual TOC title" />
+                      <small>{formatBookmarkDestination({ pageId: entry.pageId } as DocumentBookmark, pages)}</small>
+                    </div>
+                  ))}
+                </details>
+                <details className="publishing-section">
+                  <summary>Navigation Preview</summary>
+                  {generatedToc?.stale ? <p className="status-message warning compact">TOC is out of date. Regenerate before export.</p> : null}
+                  {navigationIssues.length > 0 ? navigationIssues.map((issue) => <p className="field-error" key={issue.id}>{issue.message}</p>) : <p className="muted-text">Navigation links are valid.</p>}
+                  <p className="muted-text">{bookmarks.length} bookmarks · {tocEntries.length} TOC entries · {generatedToc?.pageIds.length ?? 0} generated TOC pages</p>
+                </details>
                 <div className="project-assets-panel">
                   <div className="section-heading">
                     <strong>Project assets</strong>
@@ -3306,12 +3713,22 @@ export function App() {
               </div>
             ) : null}
 
-            {leftPanel === "bookmarks" && activeWorkspace !== "assemble" ? (
-              <div className="panel-empty">
-                <BookOpen size={22} />
-                <strong>No bookmarks yet</strong>
-                <span>Bookmark management will appear here.</span>
-              </div>
+            {leftPanel === "bookmarks" ? (
+              <BookmarkTreePanel
+                bookmarks={visibleBookmarks}
+                pages={pages}
+                selectedBookmarkId={selectedBookmarkId}
+                issues={navigationIssues}
+                onSelect={(bookmark) => navigateToBookmark(bookmark)}
+                onToggle={(bookmark) => updateBookmark(bookmark.id, { expanded: !bookmark.expanded })}
+                onRename={(bookmark, title) => updateBookmark(bookmark.id, { title })}
+                onMove={moveSelectedBookmark}
+                onNest={nestSelectedBookmark}
+                onOutdent={outdentSelectedBookmark}
+                onDuplicate={duplicateBookmark}
+                onDelete={removeBookmark}
+                onRepair={repairBookmarkDestination}
+              />
             ) : null}
 
             {activeWorkspace === "review" ? (
@@ -5300,6 +5717,81 @@ function WorkspaceButton({
   );
 }
 
+function BookmarkTreePanel({
+  bookmarks,
+  pages,
+  selectedBookmarkId,
+  issues,
+  onSelect,
+  onToggle,
+  onRename,
+  onMove,
+  onNest,
+  onOutdent,
+  onDuplicate,
+  onDelete,
+  onRepair,
+}: {
+  bookmarks: Array<DocumentBookmark & { level: number }>;
+  pages: PageView[];
+  selectedBookmarkId: string | null;
+  issues: ReturnType<typeof validateNavigation>;
+  onSelect: (bookmark: DocumentBookmark) => void;
+  onToggle: (bookmark: DocumentBookmark) => void;
+  onRename: (bookmark: DocumentBookmark, title: string) => void;
+  onMove: (direction: -1 | 1) => void;
+  onNest: () => void;
+  onOutdent: () => void;
+  onDuplicate: (bookmarkId: string) => void;
+  onDelete: (bookmarkId: string) => void;
+  onRepair: (bookmarkId: string) => void;
+}) {
+  const issueByBookmark = new Map(issues.filter((issue) => issue.bookmarkId).map((issue) => [issue.bookmarkId, issue]));
+  return (
+    <div className="panel-list bookmark-tree-panel">
+      {bookmarks.length > 0 ? (
+        <div role="tree" aria-label="Document bookmarks">
+          {bookmarks.map((bookmark) => {
+            const issue = issueByBookmark.get(bookmark.id);
+            return (
+              <div className={`bookmark-tree-row ${selectedBookmarkId === bookmark.id ? "active" : ""} ${issue ? "broken" : ""}`} key={bookmark.id} role="treeitem" aria-level={bookmark.level} aria-selected={selectedBookmarkId === bookmark.id} style={{ paddingLeft: 8 + (bookmark.level - 1) * 16 }}>
+                <button className="panel-icon-button" onClick={() => onToggle(bookmark)} aria-label={bookmark.expanded ? `Collapse ${bookmark.title}` : `Expand ${bookmark.title}`} title={bookmark.expanded ? "Collapse" : "Expand"}>
+                  {bookmark.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+                <button className="bookmark-title-button" onClick={() => onSelect(bookmark)} title={`Go to ${formatBookmarkDestination(bookmark, pages)}`}>
+                  {issue ? <AlertTriangle size={14} aria-hidden="true" /> : <BookOpen size={14} aria-hidden="true" />}
+                  <span>{bookmark.title}</span>
+                  <small>{formatBookmarkDestination(bookmark, pages)}</small>
+                </button>
+                <div className="bookmark-row-actions" aria-label={`Actions for ${bookmark.title}`}>
+                  <button onClick={() => onMove(-1)} title="Move up" aria-label="Move bookmark up"><ChevronUp size={13} /></button>
+                  <button onClick={() => onMove(1)} title="Move down" aria-label="Move bookmark down"><ChevronDown size={13} /></button>
+                  <button onClick={onOutdent} title="Outdent" aria-label="Outdent bookmark">Out</button>
+                  <button onClick={onNest} title="Nest under previous bookmark" aria-label="Nest bookmark">Nest</button>
+                  <button onClick={() => {
+                    const title = window.prompt("Bookmark title", bookmark.title)?.trim();
+                    if (title) onRename(bookmark, title);
+                  }} title="Rename bookmark" aria-label="Rename bookmark">Rename</button>
+                  <button onClick={() => onDuplicate(bookmark.id)} title="Duplicate bookmark" aria-label="Duplicate bookmark">Copy</button>
+                  {issue ? <button onClick={() => onRepair(bookmark.id)} title="Repair destination to current page" aria-label="Repair bookmark destination">Repair</button> : null}
+                  <button onClick={() => onDelete(bookmark.id)} title="Delete bookmark" aria-label="Delete bookmark">Delete</button>
+                </div>
+                {issue ? <span className="field-error" role="status">{issue.message}</span> : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="panel-empty">
+          <BookOpen size={22} />
+          <strong>No bookmarks yet</strong>
+          <span>Create bookmarks from the Assemble workspace.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type WelcomeScreenProps = {
   logoSrc: string;
   recentProjects: RecentProject[];
@@ -6403,6 +6895,59 @@ function renumberPages(pages: PageView[]) {
   return pages.map((page, index) => ({ ...page, pageNumber: index + 1 }));
 }
 
+function pageToReference(page: PageView): PageReference {
+  return { id: page.id, pageNumber: page.pageNumber, label: page.label, width: page.width, height: page.height };
+}
+
+function formatBookmarkDestination(bookmark: Pick<DocumentBookmark, "pageId">, pages: PageView[]) {
+  const page = pages.find((item) => item.id === bookmark.pageId);
+  if (!page) return "Missing page";
+  return page.label ? `${page.label} · Page ${page.pageNumber}` : `Page ${page.pageNumber}`;
+}
+
+async function importPdfOutlineBookmarks(pdf: PDFDocumentProxy, pages: PageView[]) {
+  try {
+    const outline = await pdf.getOutline();
+    if (!outline?.length) return [];
+    const bookmarks: DocumentBookmark[] = [];
+    async function visit(items: Awaited<ReturnType<PDFDocumentProxy["getOutline"]>>, parentId?: string) {
+      if (!items) return;
+      for (const [order, item] of items.entries()) {
+        const pageIndex = await getOutlinePageIndex(pdf, item.dest);
+        const page = pageIndex === undefined ? undefined : pages[pageIndex];
+        const now = new Date().toISOString();
+        const bookmark: DocumentBookmark = {
+          id: crypto.randomUUID(),
+          title: item.title || (page ? `Page ${page.pageNumber}` : "Unsupported destination"),
+          pageId: page?.id ?? `unsupported-${crypto.randomUUID()}`,
+          parentId,
+          order,
+          expanded: true,
+          createdAt: now,
+          updatedAt: now,
+        };
+        bookmarks.push(bookmark);
+        await visit(item.items, bookmark.id);
+      }
+    }
+    await visit(outline);
+    return normalizeBookmarks(bookmarks);
+  } catch {
+    return [];
+  }
+}
+
+async function getOutlinePageIndex(pdf: PDFDocumentProxy, destination: unknown) {
+  if (!destination) return undefined;
+  const resolved = typeof destination === "string" ? await pdf.getDestination(destination) : destination;
+  if (!Array.isArray(resolved) || !resolved[0]) return undefined;
+  try {
+    return await pdf.getPageIndex(resolved[0]);
+  } catch {
+    return undefined;
+  }
+}
+
 function migrateMarksToPageIds(marks: Mark[], pages: PageView[]) {
   const pageByNumber = new Map(pages.map((page) => [page.pageNumber, page]));
   const validPageIds = new Set(pages.map((page) => page.id));
@@ -6728,7 +7273,8 @@ function getProjectFingerprint(
   sourceDocuments: Record<string, SourceDocument>,
   pdfName: string,
   publishingSettings: PublishingSettings,
-  projectImageAssets: ProjectImageAssetLike[] = []
+  projectImageAssets: ProjectImageAssetLike[] = [],
+  navigation?: NavigationState
 ) {
   return JSON.stringify({
     projectId,
@@ -6749,6 +7295,7 @@ function getProjectFingerprint(
       textItems: page.textItems,
     })),
     marks,
+    navigation,
     projectImageAssets: projectImageAssets.map((asset) => ({
       id: asset.id,
       name: asset.name,
@@ -6769,6 +7316,31 @@ function getPublishingCssFontFamily(fontFamily?: string) {
   if (fontFamily === "Times Roman") return "Times New Roman, Times, serif";
   if (fontFamily === "Courier") return "Courier New, Courier, monospace";
   return "Helvetica, Arial, sans-serif";
+}
+
+function getTocStandardFontName(fontFamily: TocSettings["fontFamily"], bold: boolean) {
+  if (fontFamily === "Times Roman") return bold ? StandardFonts.TimesRomanBold : StandardFonts.TimesRoman;
+  if (fontFamily === "Courier") return bold ? StandardFonts.CourierBold : StandardFonts.Courier;
+  return bold ? StandardFonts.HelveticaBold : StandardFonts.Helvetica;
+}
+
+function createTocPreviewDataUrl(layout: TocLayoutResult, pageId: string, settings: TocSettings) {
+  const page = layout.pages.find((item) => item.id === pageId);
+  const escape = (value: string) => value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char] ?? char));
+  const lines = page?.lines.slice(0, 34) ?? [];
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}">
+      <rect width="100%" height="100%" fill="#ffffff"/>
+      <text x="${settings.marginLeft}" y="${settings.marginTop}" font-family="${getPublishingCssFontFamily(settings.fontFamily)}" font-size="${settings.fontSize * 1.7}" font-weight="700" fill="${settings.color}">${escape(settings.title)}</text>
+      ${lines
+        .map((line) => {
+          const y = layout.height - line.y;
+          const pageText = line.pageText ? `<text x="${layout.width - settings.marginRight}" y="${y}" text-anchor="end" font-family="${getPublishingCssFontFamily(settings.fontFamily)}" font-size="${settings.fontSize}" fill="${settings.color}">${escape(line.pageText)}</text>` : "";
+          return `<text x="${line.x}" y="${y}" font-family="${getPublishingCssFontFamily(settings.fontFamily)}" font-size="${settings.fontSize}" font-weight="${settings.boldLevels.includes(line.level) ? 700 : 400}" fill="${settings.color}">${escape(line.text)}</text>${pageText}`;
+        })
+        .join("")}
+    </svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 function validatePublishingSettings(settings: PublishingSettings) {
