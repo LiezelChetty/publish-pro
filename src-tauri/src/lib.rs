@@ -13,7 +13,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![force_close])
         .setup(|app| {
-            let menu = build_menu(app)?;
+            let handle = app.handle();
+            let menu = build_menu(handle)?;
             app.set_menu(menu)?;
 
             if let Some(window) = app.get_webview_window("main") {
@@ -34,7 +35,7 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::CloseRequested { api, .. }) {
+            if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.emit(MENU_EVENT, "window-close-requested");
             }
@@ -59,7 +60,11 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         .item(&menu_item(app, "open-pdf", "Open PDF")?)
         .item(&menu_item(app, "import-pdf", "Import PDF")?)
         .item(&menu_item(app, "import-docx", "Import Word Document")?)
-        .item(&menu_item(app, "import-pptx", "Import PowerPoint Presentation")?)
+        .item(&menu_item(
+            app,
+            "import-pptx",
+            "Import PowerPoint Presentation",
+        )?)
         .separator()
         .item(&menu_item(app, "publish-pdf", "Publish PDF")?)
         .item(&menu_item(app, "close-project", "Close Project")?)
@@ -102,7 +107,11 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         .build()
 }
 
-fn menu_item<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str, text: &str) -> tauri::Result<tauri::menu::MenuItem<R>> {
+fn menu_item<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    id: &str,
+    text: &str,
+) -> tauri::Result<tauri::menu::MenuItem<R>> {
     MenuItemBuilder::with_id(id, text).build(app)
 }
 
@@ -111,7 +120,10 @@ fn collect_launch_files() -> Vec<String> {
         .skip(1)
         .filter(|arg| {
             let lower = arg.to_lowercase();
-            lower.ends_with(".pproj") || lower.ends_with(".pdf") || lower.ends_with(".docx") || lower.ends_with(".pptx")
+            lower.ends_with(".pproj")
+                || lower.ends_with(".pdf")
+                || lower.ends_with(".docx")
+                || lower.ends_with(".pptx")
         })
         .collect()
 }
