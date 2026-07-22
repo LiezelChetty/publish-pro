@@ -2,6 +2,7 @@ import { isDocxFile, rejectUnsupportedWordFile } from "./docxPackage";
 import type { DocxImportOptions } from "./types";
 
 export const defaultDocxImportOptions: DocxImportOptions = {
+  fidelityMode: "balanced",
   createBookmarks: true,
   preserveSource: true,
   importHeadersFooters: true,
@@ -9,6 +10,7 @@ export const defaultDocxImportOptions: DocxImportOptions = {
   rebuildTocFromHeadings: true,
   fallbackPageSize: "letter",
   fallbackFont: "Helvetica",
+  trackedChangesMode: "accepted",
 };
 
 export function validateDocxImportFile(file: File) {

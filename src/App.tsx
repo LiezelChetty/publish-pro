@@ -125,7 +125,7 @@ import type { DocumentBookmark, NavigationState, PageReference, TocGeneratedPage
 import { createBookmarksFromDocxHeadings } from "./office/docxBookmarks";
 import { importDocxDocument } from "./office/docxImport";
 import { defaultDocxImportOptions, validateDocxImportFile } from "./office/validation";
-import type { DocxImportOptions, DocxImportReport } from "./office/types";
+import type { DocxImportMetadata, DocxImportOptions, DocxImportReport, DocxSourceMapping } from "./office/types";
 import {
   addRecentProject,
   clearRecentProjects,
@@ -247,6 +247,8 @@ type PageView = {
   pageNumber: number;
   sourceDocumentId?: string;
   sourcePageNumber?: number;
+  importMetadata?: DocxImportMetadata;
+  sourceMappings?: DocxSourceMapping[];
   width: number;
   height: number;
   rotation: number;
@@ -263,6 +265,7 @@ type SourceDocument = {
   name: string;
   bytes: Uint8Array;
   mimeType?: string;
+  importMetadata?: DocxImportMetadata;
 };
 
 type BlankPagePreset = "a4Portrait" | "a4Landscape" | "a3Portrait" | "a3Landscape" | "letterPortrait" | "letterLandscape" | "legalPortrait" | "legalLandscape" | "matchCurrent" | "custom";
@@ -415,6 +418,7 @@ export function App() {
   const [docxImportOptions, setDocxImportOptions] = useState<DocxImportOptions>(defaultDocxImportOptions);
   const [docxImportMode, setDocxImportMode] = useState<"replace" | "append">("replace");
   const [docxImportReport, setDocxImportReport] = useState<DocxImportReport | null>(null);
+  const [docxReimportTarget, setDocxReimportTarget] = useState<DocxImportMetadata | null>(null);
   const [replaceFile, setReplaceFile] = useState<MergeQueueItem | null>(null);
   const [replaceSourcePage, setReplaceSourcePage] = useState(1);
   const [replacePreserveAnnotations, setReplacePreserveAnnotations] = useState(true);
@@ -444,6 +448,18 @@ export function App() {
   const selected = marks.find((mark) => mark.id === selectedMark) ?? null;
   const comments = marks.filter((mark) => mark.kind === "comment" && mark.comment);
   const currentPageView = pages.find((page) => page.pageNumber === currentPage) ?? pages[0];
+  const currentPageImportMetadata = currentPageView?.importMetadata;
+  const docxImportGroups = useMemo(() => {
+    const groups = new Map<string, { metadata: DocxImportMetadata; pages: PageView[]; warnings: number; mappings: number }>();
+    for (const page of pages) {
+      if (!page.importMetadata) continue;
+      const existing = groups.get(page.importMetadata.importId) ?? { metadata: page.importMetadata, pages: [], warnings: page.importMetadata.warningCount, mappings: 0 };
+      existing.pages.push(page);
+      existing.mappings += page.sourceMappings?.length ?? 0;
+      groups.set(page.importMetadata.importId, existing);
+    }
+    return Array.from(groups.values());
+  }, [pages]);
   const selectedPageCount = selectedPageIds.filter((id) => pages.some((page) => page.id === id)).length;
   const activePageIds = selectedPageIds.length > 0 ? selectedPageIds.filter((id) => pages.some((page) => page.id === id)) : currentPageView ? [currentPageView.id] : [];
   const pageAnnotations = useMemo(() => countAnnotationsByPageId(marks, pages), [marks, pages]);
@@ -936,7 +952,7 @@ export function App() {
     if (!asset) return;
     const nextName = window.prompt("Asset name", asset.name)?.trim();
     if (!nextName || nextName === asset.name) return;
-    if (asset.type === "source-pdf") {
+    if (asset.type === "source-pdf" || asset.type === "source-docx") {
       setSourceDocuments((existing) => ({
         ...existing,
         ...(existing[assetId] ? { [assetId]: { ...existing[assetId], name: nextName } } : {}),
@@ -956,7 +972,7 @@ export function App() {
       setErrorMessage(`${asset.name} is currently used in this project. Remove or replace the object before deleting the asset.`);
       return;
     }
-    if (asset.type === "source-pdf") {
+    if (asset.type === "source-pdf" || asset.type === "source-docx") {
       setSourceDocuments((existing) => {
         const next = { ...existing };
         delete next[assetId];
@@ -1335,10 +1351,27 @@ export function App() {
       setPendingDocxFile(file);
       setDocxImportMode(mode);
       setDocxImportOptions(defaultDocxImportOptions);
+      setDocxReimportTarget(null);
       setErrorMessage("");
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "The selected Word document could not be imported.");
     }
+  }
+
+  function beginDocxReimport(metadata: DocxImportMetadata) {
+    const sourceId = metadata.originalSourceDocumentId;
+    const source = sourceId ? sourceDocuments[sourceId] : undefined;
+    if (!source || source.mimeType !== "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+      setErrorMessage("The original DOCX source is missing from this project. Re-import cannot continue until the source is restored.");
+      return;
+    }
+    if (!window.confirm("Re-import this Word source? Generated imported pages may be replaced. Manual annotations are preserved where page order still matches.")) return;
+    const file = new File([source.bytes.slice()], source.name, { type: source.mimeType });
+    setPendingDocxFile(file);
+    setDocxImportMode("append");
+    setDocxImportOptions(metadata.options ?? defaultDocxImportOptions);
+    setDocxReimportTarget(metadata);
+    setErrorMessage("");
   }
 
   function handleDocxUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -1360,7 +1393,12 @@ export function App() {
       const importedPages: PageView[] = [];
       for (let pageNumber = 1; pageNumber <= convertedPdf.numPages; pageNumber += 1) {
         setWorkState({ message: `Rendering imported page ${pageNumber} of ${convertedPdf.numPages}`, progress: 88 + (pageNumber / convertedPdf.numPages) * 8 });
-        importedPages.push(await renderPage(await convertedPdf.getPage(pageNumber), result.convertedPdfSource.id));
+        const renderedPage = await renderPage(await convertedPdf.getPage(pageNumber), result.convertedPdfSource.id);
+        importedPages.push({
+          ...renderedPage,
+          importMetadata: result.importMetadata,
+          sourceMappings: result.sourceMappings.filter((mapping) => mapping.pageNumber === pageNumber),
+        });
       }
       const pageIdsByNumber = new Map(importedPages.map((page) => [page.sourcePageNumber ?? page.pageNumber, page.id]));
       const importedBookmarks = docxImportOptions.createBookmarks ? createBookmarksFromDocxHeadings(result.headings, pageIdsByNumber) : [];
@@ -1382,6 +1420,7 @@ export function App() {
           name: result.convertedPdfSource.name,
           bytes: result.convertedPdfSource.bytes,
           mimeType: result.convertedPdfSource.mimeType,
+          importMetadata: result.importMetadata,
         },
       };
       if (result.originalSource) {
@@ -1390,10 +1429,31 @@ export function App() {
           name: result.originalSource.name,
           bytes: result.originalSource.bytes,
           mimeType: result.originalSource.mimeType,
+          importMetadata: result.importMetadata,
         };
       }
 
-      if (docxImportMode === "append" && hasOpenProject) {
+      if (docxReimportTarget && hasOpenProject) {
+        const targetPageIndexes = pages
+          .map((page, index) => ({ page, index }))
+          .filter((item) => item.page.importMetadata?.importId === docxReimportTarget.importId);
+        const insertIndex = targetPageIndexes[0]?.index ?? getPageInsertionIndex("after");
+        const replacedPageIds = targetPageIndexes.map((item) => item.page.id);
+        const oldToNewPageId = new Map(replacedPageIds.map((pageId, index) => [pageId, importedPages[index]?.id]).filter((entry): entry is [string, string] => Boolean(entry[1])));
+        const retainedPages = pages.filter((page) => page.importMetadata?.importId !== docxReimportTarget.importId);
+        const nextPages = renumberPages([...retainedPages.slice(0, insertIndex), ...importedPages, ...retainedPages.slice(insertIndex)]);
+        const nextMarks = marks.map((mark) => {
+          const nextPageId = mark.pageId ? oldToNewPageId.get(mark.pageId) : undefined;
+          if (!nextPageId) return mark;
+          const nextPage = nextPages.find((page) => page.id === nextPageId);
+          return nextPage ? { ...mark, pageId: nextPageId, page: nextPage.pageNumber } : mark;
+        }).filter((mark) => !mark.pageId || !replacedPageIds.includes(mark.pageId) || oldToNewPageId.has(mark.pageId));
+        setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
+        setProjectImageAssets((existing) => [...existing, ...imageAssets.filter((asset) => !existing.some((item) => item.dataUrl === asset.dataUrl))]);
+        commitDocument(nextPages, nextMarks, null, insertIndex + 1, importedPages.map((page) => page.id));
+        commitNavigation({ bookmarks: [...bookmarks.filter((bookmark) => !replacedPageIds.includes(bookmark.pageId)), ...importedBookmarks] });
+        setProjectStatusMessage(`Re-imported Word source ${pendingDocxFile.name}. Manual page annotations were preserved where page order still matched.`);
+      } else if (docxImportMode === "append" && hasOpenProject) {
         const insertIndex = getPageInsertionIndex("after");
         const nextPages = renumberPages([...pages.slice(0, insertIndex), ...importedPages, ...pages.slice(insertIndex)]);
         setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
@@ -1433,6 +1493,7 @@ export function App() {
       }
       setDocxImportReport({ ...result.report, bookmarksCreated: importedBookmarks.length });
       setPendingDocxFile(null);
+      setDocxReimportTarget(null);
       setWorkState(null);
     } catch (error) {
       setWorkState(null);
@@ -3312,11 +3373,12 @@ export function App() {
           file={pendingDocxFile}
           mode={docxImportMode}
           options={docxImportOptions}
+          reimportTarget={docxReimportTarget}
           hasOpenProject={hasOpenProject}
           isBusy={isBusy}
           onModeChange={setDocxImportMode}
           onOptionsChange={setDocxImportOptions}
-          onCancel={() => setPendingDocxFile(null)}
+          onCancel={() => { setPendingDocxFile(null); setDocxReimportTarget(null); }}
           onImport={() => void confirmDocxImport()}
         />
       ) : null}
@@ -4172,6 +4234,13 @@ export function App() {
                 <span>Rotation</span>
                 <strong>{currentPageView?.rotation ?? 0}deg</strong>
               </div>
+              {currentPageImportMetadata ? (
+                <div className="docx-import-status">
+                  <strong>Imported from Word</strong>
+                  <span>{currentPageImportMetadata.sourceName} · {currentPageImportMetadata.fidelityMode} · {currentPageView?.sourceMappings?.length ?? 0} mapped blocks</span>
+                  <button className="button ghost full-width" onClick={() => beginDocxReimport(currentPageImportMetadata)} disabled={isBusy || !currentPageImportMetadata.originalSourceDocumentId}>Re-import source</button>
+                </div>
+              ) : null}
               <label>
                 Selected page label
                 <input
@@ -4201,6 +4270,23 @@ export function App() {
                 <span>Format</span>
                 <strong>.pproj v1</strong>
               </div>
+              {docxImportGroups.length > 0 ? (
+                <details className="publishing-section" open>
+                  <summary>Word imports</summary>
+                  <div className="docx-import-list">
+                    {docxImportGroups.map((group) => (
+                      <div className="docx-import-row" key={group.metadata.importId}>
+                        <strong>{group.metadata.sourceName}</strong>
+                        <span>{group.pages.length} pages · {group.metadata.fidelityMode} · {group.mappings} mappings · {group.warnings} warnings</span>
+                        <div className="dialog-actions compact">
+                          <button className="button ghost" onClick={() => { setCurrentPage(group.pages[0]?.pageNumber ?? 1); setSelectedPageIds(group.pages[0] ? [group.pages[0].id] : []); }} disabled={!group.pages[0]}>Review</button>
+                          <button className="button ghost" onClick={() => beginDocxReimport(group.metadata)} disabled={isBusy || !group.metadata.originalSourceDocumentId}>Re-import</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
               <div className="property-readout">
                 <span>Last saved</span>
                 <strong>{lastSavedAt ? formatDateTime(lastSavedAt) : "Not saved"}</strong>
@@ -6082,6 +6168,7 @@ function DocxImportDialog({
   file,
   mode,
   options,
+  reimportTarget,
   hasOpenProject,
   isBusy,
   onModeChange,
@@ -6092,6 +6179,7 @@ function DocxImportDialog({
   file: File;
   mode: "replace" | "append";
   options: DocxImportOptions;
+  reimportTarget: DocxImportMetadata | null;
   hasOpenProject: boolean;
   isBusy: boolean;
   onModeChange: (mode: "replace" | "append") => void;
@@ -6109,16 +6197,27 @@ function DocxImportDialog({
         </div>
         <div className="dialog-body">
           <p className="dialog-note">
-            Publish Pro converts this DOCX into editable project pages. The original Word file can be preserved inside the project for traceability.
+            {reimportTarget
+              ? "Publish Pro will re-import this preserved Word source and replace the previous generated Word pages only after conversion succeeds."
+              : "Publish Pro converts this DOCX into editable project pages. The original Word file can be preserved inside the project for traceability."}
           </p>
           <div className="import-summary">
             <strong>{file.name}</strong>
             <span>{formatAssetSize(file.size)} · DOCX</span>
           </div>
+          <label>
+            Fidelity
+            <select value={options.fidelityMode} onChange={(event) => update({ fidelityMode: event.currentTarget.value as DocxImportOptions["fidelityMode"] })}>
+              <option value="fast">Fast - simplified layout</option>
+              <option value="balanced">Balanced - recommended</option>
+              <option value="high">High Fidelity - slower, more detailed</option>
+            </select>
+          </label>
+          {options.fidelityMode === "high" ? <p className="dialog-note">High Fidelity improves table, spacing, and image handling, but Word-specific layout may still differ.</p> : null}
           {hasOpenProject ? (
             <label>
               Import mode
-              <select value={mode} onChange={(event) => onModeChange(event.currentTarget.value as "replace" | "append")}>
+              <select value={mode} onChange={(event) => onModeChange(event.currentTarget.value as "replace" | "append")} disabled={Boolean(reimportTarget)}>
                 <option value="append">Append to current project</option>
                 <option value="replace">Create new project from Word document</option>
               </select>
@@ -6130,6 +6229,13 @@ function DocxImportDialog({
             <label className="checkbox-row"><input type="checkbox" checked={options.importHeadersFooters} onChange={(event) => update({ importHeadersFooters: event.currentTarget.checked })} />Import simple headers and footers as publishing settings</label>
             <label className="checkbox-row"><input type="checkbox" checked={options.importHyperlinks} onChange={(event) => update({ importHyperlinks: event.currentTarget.checked })} />Preserve hyperlink text styling</label>
           </div>
+          <label>
+            Tracked changes
+            <select value={options.trackedChangesMode} onChange={(event) => update({ trackedChangesMode: event.currentTarget.value as DocxImportOptions["trackedChangesMode"] })}>
+              <option value="accepted">Show accepted result</option>
+              <option value="rejectDeletions">Preserve deleted text where readable</option>
+            </select>
+          </label>
           <div className="page-field-grid">
             <label>
               Fallback page size
@@ -6151,7 +6257,7 @@ function DocxImportDialog({
           <p className="dialog-note">This first phase imports Office Open XML content locally in the browser. Legacy `.doc` files are not supported.</p>
           <div className="dialog-actions">
             <button className="button ghost" onClick={onCancel} disabled={isBusy}>Cancel</button>
-            <button className="button primary" onClick={onImport} disabled={isBusy}>Import Word document</button>
+            <button className="button primary" onClick={onImport} disabled={isBusy}>{reimportTarget ? "Re-import Word document" : "Import Word document"}</button>
           </div>
         </div>
       </section>
@@ -6169,13 +6275,34 @@ function DocxImportReportDialog({ report, onClose }: { report: DocxImportReport;
         </div>
         <div className="dialog-body">
           <div className="project-stats-grid">
+            <div><strong>{report.fidelityMode}</strong><span>Fidelity</span></div>
             <div><strong>{report.pagesCreated}</strong><span>Pages</span></div>
+            <div><strong>{report.sectionsDetected}</strong><span>Sections</span></div>
             <div><strong>{report.headingsFound}</strong><span>Headings</span></div>
             <div><strong>{report.bookmarksCreated}</strong><span>Bookmarks</span></div>
             <div><strong>{report.imagesImported}</strong><span>Images</span></div>
             <div><strong>{report.tablesImported}</strong><span>Tables</span></div>
             <div><strong>{report.listsImported}</strong><span>Lists</span></div>
+            <div><strong>{report.hyperlinksImported}</strong><span>Links</span></div>
+            <div><strong>{report.sourceMappings}</strong><span>Mappings</span></div>
           </div>
+          <div className="import-review-summary">
+            <span>Parse {Math.round(report.parseTimeMs)}ms</span>
+            <span>Render {Math.round(report.renderTimeMs)}ms</span>
+            <span>Total {Math.round(report.totalTimeMs)}ms</span>
+          </div>
+          {report.fontSubstitutions.length > 0 ? (
+            <div className="validation-list">
+              <strong>Font substitutions</strong>
+              {report.fontSubstitutions.map((item, index) => <div className="validation-row warning" key={`font-${index}`}><AlertTriangle size={15} /><span>{item}</span></div>)}
+            </div>
+          ) : null}
+          {report.layoutSimplifications.length > 0 ? (
+            <div className="validation-list">
+              <strong>Layout simplifications</strong>
+              {report.layoutSimplifications.map((item, index) => <div className="validation-row warning" key={`layout-${index}`}><AlertTriangle size={15} /><span>{item}</span></div>)}
+            </div>
+          ) : null}
           {report.warnings.length > 0 ? (
             <div className="validation-list">
               <strong>Import warnings</strong>
@@ -7690,6 +7817,8 @@ function getProjectFingerprint(
       background: page.background,
       imageUrl: page.imageUrl,
       textItems: page.textItems,
+      importMetadata: page.importMetadata,
+      sourceMappings: page.sourceMappings,
     })),
     marks,
     navigation,

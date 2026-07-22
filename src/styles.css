@@ -4915,6 +4915,40 @@ nav.left-nav.workspace-nav .workspace-button {
   white-space: nowrap;
 }
 
+.docx-import-status,
+.docx-import-row {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgb(248 250 252 / 0.76);
+}
+
+.docx-import-status strong,
+.docx-import-row strong {
+  color: #172033;
+  font-size: 13px;
+}
+
+.docx-import-status span,
+.docx-import-row span,
+.import-review-summary {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.docx-import-list {
+  display: grid;
+  gap: 8px;
+}
+
+.import-review-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .field-error,
 .status-message.compact {
   margin: 0;
@@ -4980,6 +5014,22 @@ nav.left-nav.workspace-nav .workspace-button {
 
 :root[data-theme="dark"] .preset-row {
   background: rgb(15 23 42 / 0.42);
+}
+
+:root[data-theme="dark"] .docx-import-status,
+:root[data-theme="dark"] .docx-import-row {
+  background: rgb(15 23 42 / 0.42);
+}
+
+:root[data-theme="dark"] .docx-import-status strong,
+:root[data-theme="dark"] .docx-import-row strong {
+  color: #f8fafc;
+}
+
+:root[data-theme="dark"] .docx-import-status span,
+:root[data-theme="dark"] .docx-import-row span,
+:root[data-theme="dark"] .import-review-summary {
+  color: #94a3b8;
 }
 
 :root[data-theme="dark"] .publishing-zone-control,
