@@ -148,6 +148,7 @@ GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const THEME_STORAGE_KEY = "publish-pro-theme";
 const WORKSPACE_STORAGE_KEY = "publish-pro-active-workspace";
+const APP_VERSION_LABEL = "0.9.0 Beta";
 
 type ShapeTool = `shape:${ShapeKind}`;
 type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | ShapeTool | TextMarkupKind;
@@ -431,6 +432,8 @@ export function App() {
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [isShortcutDialogOpen, setIsShortcutDialogOpen] = useState(false);
+  const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
+  const [isAboutDialogOpen, setIsAboutDialogOpen] = useState(false);
   const [isCloseGuardOpen, setIsCloseGuardOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [selectedPageIds, setSelectedPageIds] = useState<string[]>([demoPages[0].id]);
@@ -568,6 +571,7 @@ export function App() {
   const isBusy = workState !== null;
   const canUndo = (history.past.length > 0 || publishingHistory.past.length > 0 || navigationHistory.past.length > 0) && !isBusy;
   const canRedo = (history.future.length > 0 || publishingHistory.future.length > 0 || navigationHistory.future.length > 0) && !isBusy;
+  const runtimePrivacyCopy = runtime.isDesktop ? "Files stay securely on your device." : "Files stay in this browser unless you choose to save or publish them.";
   const saveStatus = workState
     ? workState.message
     : hasUnsavedChanges
@@ -1002,8 +1006,19 @@ export function App() {
     }
   }
 
-  function reopenRecentProject(project: RecentProject) {
-    setErrorMessage(`${project.name} is listed in Recents. Browser security does not allow Publish Pro to reopen a downloaded project file automatically; choose Open Project and select ${project.savedFilename ?? "the .pproj file"}.`);
+  async function reopenRecentProject(project: RecentProject) {
+    if (runtime.isDesktop && project.origin === "file-system-access") {
+      try {
+        const runtimeFile = await runtime.readPath(project.id);
+        if (!runtimeFile) throw new Error("Project file was not available.");
+        await openProjectFile(await runtimeFileToBrowserFile(runtimeFile), runtimeFile.path);
+        return;
+      } catch {
+        setErrorMessage(`${project.name} could not be reopened from its saved location. Choose Open Project and select ${project.savedFilename ?? "the .pproj file"} again.`);
+        return;
+      }
+    }
+    setErrorMessage(`${project.name} is listed in Recents. Choose Open Project and select ${project.savedFilename ?? "the .pproj file"} to reopen it.`);
   }
 
   function updateProjectMetadata(patch: Partial<ProjectMetadata>) {
@@ -1203,7 +1218,7 @@ export function App() {
         setLastAutosavedAt(autosave?.savedAt ?? null);
       })
       .catch(() => {
-        if (!cancelled) setProjectStatusMessage("Autosave storage is unavailable in this browser session.");
+        if (!cancelled) setProjectStatusMessage("Autosave storage is unavailable in this session.");
       });
     return () => {
       cancelled = true;
@@ -1224,7 +1239,7 @@ export function App() {
           setLastAutosavedAt(autosave?.savedAt ?? null);
           setProjectStatusMessage(autosave ? `Autosaved locally at ${formatDateTime(autosave.savedAt)}.` : "Autosave is handled by the active runtime.");
         } catch {
-          setProjectStatusMessage("Autosave failed. Your current browser session is still active.");
+          setProjectStatusMessage("Autosave failed. Your current work remains open.");
         }
       })();
     }, 900);
@@ -1301,8 +1316,9 @@ export function App() {
     if (action === "fit-width") setZoom(1.25);
     if (action === "toggle-left-panel") setIsLeftPanelCollapsed((value) => !value);
     if (action === "toggle-inspector") setIsRightPanelCollapsed((value) => !value);
+    if (action === "settings") setIsSettingsDialogOpen(true);
     if (action === "shortcuts") setIsShortcutDialogOpen(true);
-    if (action === "about") pushToast({ tone: "info", title: "Publish Pro 0.1.0", detail: "By Designovation. Local-first desktop publishing workspace." });
+    if (action === "about") setIsAboutDialogOpen(true);
   }
 
   async function saveAndCloseDesktop() {
@@ -3845,6 +3861,8 @@ export function App() {
         onUndo={undo}
         onRedo={redo}
         onShowShortcuts={() => setIsShortcutDialogOpen(true)}
+        onShowSettings={() => setIsSettingsDialogOpen(true)}
+        onShowAbout={() => setIsAboutDialogOpen(true)}
         onExport={() => void exportPdf()}
       />
       <input className="hidden-file-input" ref={projectInput} type="file" accept=".pproj,application/zip" onChange={handleProjectUpload} aria-label="Choose Publish Pro project file" />
@@ -4117,6 +4135,25 @@ export function App() {
         <ShortcutReferenceDialog
           onClose={() => setIsShortcutDialogOpen(false)}
           isMac={navigator.platform.toLowerCase().includes("mac")}
+        />
+      ) : null}
+
+      {isSettingsDialogOpen ? (
+        <SettingsDialog
+          runtimeLabel={runtime.isDesktop ? "Desktop application" : "Browser preview"}
+          themeMode={themeMode}
+          resolvedTheme={resolvedTheme}
+          onThemeChange={changeThemeMode}
+          onClose={() => setIsSettingsDialogOpen(false)}
+        />
+      ) : null}
+
+      {isAboutDialogOpen ? (
+        <AboutDialog
+          version={APP_VERSION_LABEL}
+          runtimeLabel={runtime.isDesktop ? "Desktop application" : "Browser preview"}
+          privacyCopy={runtimePrivacyCopy}
+          onClose={() => setIsAboutDialogOpen(false)}
         />
       ) : null}
 
@@ -4411,7 +4448,7 @@ export function App() {
                           <small>{formatBookmarkDestination(bookmark, pages)}</small>
                         </button>
                       );
-                    }) : <p className="muted-text">No bookmarks yet.</p>}
+                    }) : <p className="muted-text">No bookmarks yet. Add one from the current page, selected pages, or page labels before generating a table of contents.</p>}
                   </div>
                 </details>
                 <details className="publishing-section">
@@ -4467,7 +4504,11 @@ export function App() {
                       </div>
                     ))
                   ) : (
-                    <p className="muted-text">No embedded project assets yet.</p>
+                    <div className="panel-empty inline">
+                      <ImageIcon size={20} />
+                      <strong>No project assets</strong>
+                      <span>Import logos, images, or signatures from the Import workspace to reuse them in publishing marks.</span>
+                    </div>
                   )}
                 </div>
               </div>
@@ -4673,7 +4714,7 @@ export function App() {
                   <div className="panel-empty">
                     <MessageSquare size={22} />
                     <strong>No comments</strong>
-                    <span>Add a comment from the toolbar.</span>
+                    <span>Use Sticky note in the Review workspace to place a comment on the current page.</span>
                   </div>
                 )}
               </div>
@@ -4774,6 +4815,8 @@ export function App() {
                   })();
                 }}
                 onRestoreAutosave={restoreAutosave}
+                version={APP_VERSION_LABEL}
+                privacyCopy={runtimePrivacyCopy}
               />
             ) : (
             pages
@@ -5871,7 +5914,7 @@ export function App() {
                   </button>
                 ))
               ) : (
-                <p className="muted-text">No comments match this view.</p>
+                <p className="muted-text">No comments match this view. Change the filter or select another page to review more notes.</p>
               )}
             </div>
             </div>
@@ -5959,7 +6002,11 @@ function ImportSourceManager({
         <span>{sourceCount} connected</span>
       </div>
       {sourceCount === 0 ? (
-        <p className="muted-text">No external sources imported yet.</p>
+        <div className="panel-empty inline">
+          <Files size={20} />
+          <strong>No sources</strong>
+          <span>Open a PDF or import Word, PowerPoint, or additional PDFs to build this project.</span>
+        </div>
       ) : null}
       {pdfSources.map((source) => {
         const contributedPages = pages.filter((page) => page.sourceDocumentId === source.id);
@@ -6056,6 +6103,108 @@ function ShortcutReferenceDialog({ isMac, onClose }: { isMac: boolean; onClose: 
                 <span>{action}</span>
               </div>
             ))}
+          </div>
+          <div className="dialog-actions">
+            <button className="button primary" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SettingsDialog({
+  runtimeLabel,
+  themeMode,
+  resolvedTheme,
+  onThemeChange,
+  onClose,
+}: {
+  runtimeLabel: string;
+  themeMode: ThemeMode;
+  resolvedTheme: "light" | "dark";
+  onThemeChange: (mode: ThemeMode) => void;
+  onClose: () => void;
+}) {
+  const options: Array<{ mode: ThemeMode; label: string; detail: string }> = [
+    { mode: "system", label: "System", detail: `Follow system appearance (${resolvedTheme}).` },
+    { mode: "light", label: "Light", detail: "Use the light workspace theme." },
+    { mode: "dark", label: "Dark", detail: "Use the dark workspace theme." },
+  ];
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
+        <div className="modal-header">
+          <h2 id="settings-dialog-title">Settings</h2>
+          <button className="panel-icon-button" onClick={onClose} aria-label="Close settings" title="Close settings">x</button>
+        </div>
+        <div className="dialog-body">
+          <p className="dialog-note">Publish Pro stores preferences and autosaves locally for this {runtimeLabel.toLowerCase()}.</p>
+          <div className="validation-list">
+            <strong>Appearance</strong>
+            {options.map((option) => (
+              <button
+                className={`settings-choice ${themeMode === option.mode ? "active" : ""}`}
+                key={option.mode}
+                onClick={() => onThemeChange(option.mode)}
+                aria-pressed={themeMode === option.mode}
+              >
+                <span>
+                  <strong>{option.label}</strong>
+                  <small>{option.detail}</small>
+                </span>
+                {themeMode === option.mode ? <CheckCircle2 size={18} aria-hidden="true" /> : null}
+              </button>
+            ))}
+          </div>
+          <div className="validation-list">
+            <strong>Beta defaults</strong>
+            <div className="validation-row"><span>Telemetry is off. Files and signatures are not uploaded by Publish Pro.</span></div>
+            <div className="validation-row"><span>Autosave and recent-project data remain local to this installation.</span></div>
+          </div>
+          <div className="dialog-actions">
+            <button className="button primary" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AboutDialog({
+  version,
+  runtimeLabel,
+  privacyCopy,
+  onClose,
+}: {
+  version: string;
+  runtimeLabel: string;
+  privacyCopy: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="modal-card about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-dialog-title">
+        <div className="modal-header">
+          <h2 id="about-dialog-title">About Publish Pro</h2>
+          <button className="panel-icon-button" onClick={onClose} aria-label="Close about Publish Pro" title="Close about dialog">x</button>
+        </div>
+        <div className="dialog-body">
+          <div className="about-product">
+            <strong>Publish Pro</strong>
+            <span>{version}</span>
+          </div>
+          <p className="dialog-note">Designovation desktop application for local-first document publishing.</p>
+          <div className="validation-list">
+            <div className="validation-row"><span>{runtimeLabel}</span></div>
+            <div className="validation-row"><span>{privacyCopy}</span></div>
+            <div className="validation-row"><span>Copyright Designovation. All rights reserved.</span></div>
+            <div className="validation-row"><span>Website: publishpro.designovation.example</span></div>
+            <div className="validation-row"><span>Support: support@designovation.example</span></div>
           </div>
           <div className="dialog-actions">
             <button className="button primary" onClick={onClose}>Done</button>
@@ -6925,7 +7074,7 @@ function BookmarkTreePanel({
         <div className="panel-empty">
           <BookOpen size={22} />
           <strong>No bookmarks yet</strong>
-          <span>Create bookmarks from the Assemble workspace.</span>
+          <span>Create bookmarks from the current page, selected pages, or page labels in the Import workspace.</span>
         </div>
       )}
     </div>
@@ -6941,10 +7090,12 @@ type WelcomeScreenProps = {
   onOpenPdf: () => void;
   onOpenDocx: () => void;
   onOpenPptx: () => void;
-  onOpenRecent: (project: RecentProject) => void;
+  onOpenRecent: (project: RecentProject) => void | Promise<void>;
   onRemoveRecent: (id: string) => void;
   onClearRecent: () => void;
   onRestoreAutosave: () => void;
+  version: string;
+  privacyCopy: string;
 };
 
 function DocxImportDialog({
@@ -7064,7 +7215,7 @@ function DocxImportDialog({
               </select>
             </label>
           </div>
-          <p className="dialog-note">This first phase imports Office Open XML content locally in the browser. Legacy `.doc` files are not supported.</p>
+          <p className="dialog-note">This first phase imports Office Open XML content locally on this device. Legacy `.doc` files are not supported.</p>
           <div className="dialog-actions">
             <button className="button ghost" onClick={onCancel} disabled={isBusy}>Cancel</button>
             <button className="button primary" onClick={onImport} disabled={isBusy}>{reimportTarget ? "Re-import Word document" : "Import Word document"}</button>
@@ -7668,15 +7819,17 @@ function WelcomeScreen({
   onRemoveRecent,
   onClearRecent,
   onRestoreAutosave,
+  version,
+  privacyCopy,
 }: WelcomeScreenProps) {
   return (
     <section className="welcome-screen" aria-label="Publish Pro welcome screen">
       <div className="welcome-hero">
         <img src={logoSrc} alt="" aria-hidden="true" />
         <div>
-          <span>Publish Pro</span>
+          <span>Publish Pro · {version}</span>
           <h1>Document publishing workspace</h1>
-          <p>Create a project, open a PDF, or restore recent local work.</p>
+          <p>Create a project, open a PDF, or restore recent local work. {privacyCopy}</p>
         </div>
       </div>
       <div className="welcome-actions" role="group" aria-label="Start options">
@@ -7705,7 +7858,7 @@ function WelcomeScreen({
       <div className="welcome-drop-zone">
         <Files size={28} />
         <strong>Drop a PDF, DOCX, PPTX, or .pproj file here</strong>
-        <span>Files stay local in your browser.</span>
+        <span>{privacyCopy}</span>
       </div>
       <div className="recent-projects">
         <div className="section-heading">
@@ -7725,7 +7878,11 @@ function WelcomeScreen({
             </div>
           ))
         ) : (
-          <p className="muted-text">Recent projects appear here after you save or open a `.pproj` file.</p>
+          <div className="panel-empty inline">
+            <Files size={20} />
+            <strong>No recent projects</strong>
+            <span>Open or save a `.pproj` file and it will appear here for quick access.</span>
+          </div>
         )}
         {recentProjects.length > 0 ? (
           <button className="link-button recent-clear" onClick={onClearRecent}>

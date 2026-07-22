@@ -5329,6 +5329,53 @@ nav.left-nav.workspace-nav .workspace-button {
   white-space: nowrap;
 }
 
+.settings-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--pp-radius-md);
+  background: var(--control-bg);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.settings-choice:hover {
+  background: var(--control-hover);
+}
+
+.settings-choice.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.settings-choice span,
+.about-product {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-choice small,
+.about-product span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.about-product strong {
+  color: var(--text-primary);
+  font-size: 22px;
+}
+
+.panel-empty.inline {
+  padding: 12px 0;
+  align-items: flex-start;
+  text-align: left;
+}
+
 :root[data-theme="dark"] .document-title small,
 :root[data-theme="dark"] .toolbar-context strong,
 :root[data-theme="dark"] .source-row small,

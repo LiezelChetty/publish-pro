@@ -33,7 +33,7 @@ npm run desktop:build:debug
 - Product: Publish Pro
 - Publisher: Designovation
 - Identifier: `com.designovation.publishpro`
-- Version: inherited from the app version, currently `0.1.0`
+- Version: inherited from the app version, currently `0.9.0 Beta`
 
 ## Runtime Architecture
 

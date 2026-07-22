@@ -98,6 +98,7 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         .build()?;
 
     let help = SubmenuBuilder::new(app, "Help")
+        .item(&menu_item(app, "settings", "Settings")?)
         .item(&menu_item(app, "shortcuts", "Keyboard Shortcuts")?)
         .item(&menu_item(app, "about", "About Publish Pro")?)
         .build()?;

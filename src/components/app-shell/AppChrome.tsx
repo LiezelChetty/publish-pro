@@ -1,4 +1,4 @@
-import { Download, FilePlus2, FileText, FolderOpen, Keyboard, Monitor, Moon, MoreHorizontal, Printer, Redo2, Save, Sun, Undo2, X } from "lucide-react";
+import { Download, FilePlus2, FileText, FolderOpen, Info, Keyboard, Monitor, Moon, MoreHorizontal, Printer, Redo2, Save, Settings, Sun, Undo2, X } from "lucide-react";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -25,6 +25,8 @@ type AppChromeProps = {
   onUndo: () => void;
   onRedo: () => void;
   onShowShortcuts: () => void;
+  onShowSettings: () => void;
+  onShowAbout: () => void;
   onExport: () => void;
 };
 
@@ -57,6 +59,8 @@ export function AppChrome({
   onUndo,
   onRedo,
   onShowShortcuts,
+  onShowSettings,
+  onShowAbout,
   onExport,
 }: AppChromeProps) {
   return (
@@ -104,7 +108,9 @@ export function AppChrome({
             <button onClick={onSaveProject} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project</button>
             <button onClick={onSaveProjectAs} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project As</button>
             <button onClick={onCloseProject} disabled={isBusy || !canSaveProject}><X size={15} />Close Project</button>
+            <button onClick={onShowSettings}><Settings size={15} />Settings</button>
             <button onClick={onShowShortcuts}><Keyboard size={15} />Keyboard Shortcuts</button>
+            <button onClick={onShowAbout}><Info size={15} />About Publish Pro</button>
             <button disabled><Printer size={15} />Print</button>
             <div className="appearance-menu" role="group" aria-label="Appearance">
               <span>Appearance</span>

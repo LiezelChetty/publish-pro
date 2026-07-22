@@ -1,5 +1,7 @@
 # Publish Pro
 
+Version 0.9.0 Beta
+
 Publish Pro is a local-first professional PDF publishing workspace. It supports PDF, DOCX, and PPTX import, project files, page assembly, annotations, comments, bookmarks, publishing marks, and PDF export.
 
 ## Run locally
