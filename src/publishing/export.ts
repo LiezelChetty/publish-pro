@@ -1,4 +1,4 @@
-import { degrees, PDFDocument, rgb, StandardFonts, type PDFFont } from "pdf-lib";
+import { degrees, PDFDocument, rgb, StandardFonts, type PDFFont, type PDFImage } from "pdf-lib";
 import { getPublishingPreviewItems } from "./layout";
 import type { PublishingPageLike, PublishingSettings, PublishingTextStyle, PublishingTokenContext } from "./types";
 
@@ -28,19 +28,28 @@ export async function drawPublishingMarksToPdf({
   layer: "watermark" | "foreground";
 }) {
   const fontCache = new Map<string, PDFFont>();
-  const imageCache = new Map<string, Awaited<ReturnType<PDFDocument["embedPng"]>>>();
+  const imageCache = new Map<string, PDFImage>();
 
   for (const [index, pageView] of pages.entries()) {
     const page = pdf.getPage(index);
     const pdfSize = page.getSize();
     const scaleX = pdfSize.width / pageView.width;
     const scaleY = pdfSize.height / pageView.height;
-    const previewItems = getPublishingPreviewItems({ settings, page: pageView, pages, currentPage, selectedPageIds, tokenContext });
+    const previewItems = getPublishingPreviewItems({
+      settings,
+      page: pageView,
+      pages,
+      currentPage,
+      selectedPageIds,
+      tokenContext,
+      imageAssetIds: imageAssets.map((asset) => asset.id),
+    });
 
     for (const item of previewItems) {
       if (item.kind === "safeArea") continue;
       if (layer === "watermark" && item.kind !== "watermark") continue;
       if (layer === "foreground" && item.kind === "watermark") continue;
+      if (item.kind === "missingImage") continue;
 
       if (item.kind === "watermark" && settings.watermark.type === "image" && settings.watermark.imageAssetId) {
         const asset = imageAssets.find((candidate) => candidate.id === settings.watermark.imageAssetId);
@@ -58,6 +67,25 @@ export async function drawPublishingMarksToPdf({
               height,
               rotate: degrees(settings.watermark.rotation),
               opacity: settings.watermark.opacity,
+            });
+          }
+        }
+        continue;
+      }
+
+      if (item.kind === "image" && item.assetId) {
+        const asset = imageAssets.find((candidate) => candidate.id === item.assetId);
+        if (asset?.dataUrl) {
+          const embedded = await getEmbeddedImage(pdf, imageCache, asset);
+          if (embedded && item.width && item.height) {
+            const width = item.width * scaleX;
+            const height = item.height * scaleY;
+            page.drawImage(embedded, {
+              x: item.align === "center" ? item.x * scaleX - width / 2 : item.align === "right" ? item.x * scaleX - width : item.x * scaleX,
+              y: pdfSize.height - item.y * scaleY - height / 2,
+              width,
+              height,
+              opacity: item.opacity ?? 1,
             });
           }
         }
@@ -112,7 +140,7 @@ function getStandardFont(style: PublishingTextStyle) {
   return StandardFonts.Helvetica;
 }
 
-async function getEmbeddedImage(pdf: PDFDocument, cache: Map<string, Awaited<ReturnType<PDFDocument["embedPng"]>>>, asset: ImageAsset) {
+async function getEmbeddedImage(pdf: PDFDocument, cache: Map<string, PDFImage>, asset: ImageAsset) {
   const existing = cache.get(asset.id);
   if (existing) return existing;
   if (!asset.dataUrl) return null;

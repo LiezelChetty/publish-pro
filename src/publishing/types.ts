@@ -4,6 +4,9 @@ export type PublishingNumberFormat = "decimal" | "decimal2" | "decimal3" | "roma
 export type PublishingFontFamily = "Helvetica" | "Times Roman" | "Courier";
 export type PublishingUnit = "mm" | "cm" | "in" | "pt";
 export type PublishingPositionPreset = "center" | "topLeft" | "topCenter" | "topRight" | "bottomLeft" | "bottomCenter" | "bottomRight" | "custom";
+export type PublishingZoneImageLayout = "imageOnly" | "textBeforeImage" | "imageBeforeText" | "imageAboveText" | "textAboveImage";
+export type PublishingHorizontalAlign = "left" | "center" | "right";
+export type PublishingVerticalAlign = "top" | "middle" | "bottom";
 
 export type PublishingTarget = {
   mode: PublishingTargetMode;
@@ -22,7 +25,26 @@ export type PublishingTextStyle = {
 
 export type HeaderFooterZone = {
   text: string;
+  image?: HeaderFooterZoneImage;
 };
+
+export type HeaderFooterZoneImage = {
+  assetId?: string;
+  width: number;
+  height: number;
+  maxWidth: number;
+  maxHeight: number;
+  maintainAspectRatio: boolean;
+  opacity: number;
+  horizontalAlign: PublishingHorizontalAlign;
+  verticalAlign: PublishingVerticalAlign;
+  padding: number;
+  offsetX: number;
+  offsetY: number;
+  layout: PublishingZoneImageLayout;
+};
+
+export type HeaderFooterZoneOverride = string | HeaderFooterZone;
 
 export type HeaderFooterSettings = {
   enabled: boolean;
@@ -33,9 +55,9 @@ export type HeaderFooterSettings = {
   style: PublishingTextStyle;
   header: Record<"left" | "center" | "right", HeaderFooterZone>;
   footer: Record<"left" | "center" | "right", HeaderFooterZone>;
-  firstPage?: Partial<Record<PublishingZone, string>>;
-  oddPage?: Partial<Record<PublishingZone, string>>;
-  evenPage?: Partial<Record<PublishingZone, string>>;
+  firstPage?: Partial<Record<PublishingZone, HeaderFooterZoneOverride>>;
+  oddPage?: Partial<Record<PublishingZone, HeaderFooterZoneOverride>>;
+  evenPage?: Partial<Record<PublishingZone, HeaderFooterZoneOverride>>;
 };
 
 export type PageNumberSettings = {
@@ -99,8 +121,9 @@ export type PublishingPageLike = {
 
 export type PublishingPreviewItem = {
   id: string;
-  kind: "text" | "watermark" | "safeArea";
+  kind: "text" | "watermark" | "safeArea" | "image" | "missingImage";
   text?: string;
+  assetId?: string;
   x: number;
   y: number;
   width?: number;

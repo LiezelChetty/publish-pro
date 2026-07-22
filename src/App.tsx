@@ -88,12 +88,12 @@ import {
   type ShapeStyle,
 } from "./shapes";
 import { AppChrome, type ThemeMode } from "./components/app-shell/AppChrome";
-import { createDefaultPublishingSettings, mergePublishingSettings, publishingWatermarkPresets } from "./publishing/defaults";
+import { createDefaultHeaderFooterImage, createDefaultPublishingSettings, mergeHeaderFooterZone, mergePublishingSettings, publishingWatermarkPresets } from "./publishing/defaults";
 import { drawPublishingMarksToPdf } from "./publishing/export";
 import { getPublishingPreviewItems } from "./publishing/layout";
 import { getPageRangeError } from "./publishing/pageRanges";
 import { deletePublishingPreset, loadPublishingPresets, savePublishingPreset, type PublishingPreset } from "./publishing/presets";
-import type { PublishingNumberFormat, PublishingPositionPreset, PublishingSettings, PublishingTargetMode, PublishingUnit, PublishingZone } from "./publishing/types";
+import type { HeaderFooterZone, HeaderFooterZoneImage, PublishingNumberFormat, PublishingPositionPreset, PublishingSettings, PublishingTargetMode, PublishingUnit, PublishingZone, PublishingZoneImageLayout } from "./publishing/types";
 import { collectProjectAssets, formatAssetSize } from "./projects/assets";
 import { createProjectMetadata, type ProjectMetadata } from "./projects/schema";
 import { buildProjectManifest, deserializeProject, serializeProject } from "./projects/serialization";
@@ -384,6 +384,13 @@ export function App() {
   const activePageIds = selectedPageIds.length > 0 ? selectedPageIds.filter((id) => pages.some((page) => page.id === id)) : currentPageView ? [currentPageView.id] : [];
   const pageAnnotations = useMemo(() => countAnnotationsByPageId(marks, pages), [marks, pages]);
   const projectAssets = useMemo(() => collectProjectAssets(sourceDocuments, pages, marks), [sourceDocuments, pages, marks]);
+  const publishingImageAssets = useMemo(
+    () =>
+      marks
+        .filter((mark) => (mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl)
+        .map((mark) => ({ id: mark.id, name: mark.imageName || mark.text || mark.kind, dataUrl: mark.imageDataUrl, mimeType: mark.imageMimeType })),
+    [marks]
+  );
   const currentProjectFingerprint = useMemo(
     () => getProjectFingerprint(projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings),
     [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings]
@@ -671,6 +678,64 @@ export function App() {
     if (!name || name === preset.name) return;
     savePublishingPreset({ ...preset, name });
     setPublishingPresets(loadPublishingPresets());
+  }
+
+  function updateHeaderFooterZone(area: "header" | "footer", side: "left" | "center" | "right", patch: Partial<HeaderFooterZone>) {
+    updatePublishingSettings((settings) => ({
+      ...settings,
+      headerFooter: {
+        ...settings.headerFooter,
+        [area]: {
+          ...settings.headerFooter[area],
+          [side]: {
+            ...settings.headerFooter[area][side],
+            ...patch,
+            image: Object.prototype.hasOwnProperty.call(patch, "image") ? patch.image : settings.headerFooter[area][side].image,
+          },
+        },
+      },
+    }), patch.text === undefined);
+  }
+
+  function updateHeaderFooterZoneImage(area: "header" | "footer", side: "left" | "center" | "right", patch: Partial<HeaderFooterZoneImage>) {
+    updateHeaderFooterZone(area, side, {
+      image: {
+        ...createDefaultHeaderFooterImage(),
+        ...publishingSettings.headerFooter[area][side].image,
+        ...patch,
+      },
+    });
+  }
+
+  function updateHeaderFooterOverrideZone(key: "firstPage" | "oddPage" | "evenPage", zone: PublishingZone, patch: Partial<HeaderFooterZone>) {
+    updatePublishingSettings((settings) => {
+      const existing = mergeHeaderFooterZone(settings.headerFooter[key]?.[zone]);
+      return {
+        ...settings,
+        headerFooter: {
+          ...settings.headerFooter,
+          [key]: {
+            ...(settings.headerFooter[key] ?? {}),
+            [zone]: {
+              ...existing,
+              ...patch,
+              image: Object.prototype.hasOwnProperty.call(patch, "image") ? patch.image : existing.image,
+            },
+          },
+        },
+      };
+    }, patch.text === undefined);
+  }
+
+  function updateHeaderFooterOverrideImage(key: "firstPage" | "oddPage" | "evenPage", zone: PublishingZone, patch: Partial<HeaderFooterZoneImage>) {
+    const existing = mergeHeaderFooterZone(publishingSettings.headerFooter[key]?.[zone]);
+    updateHeaderFooterOverrideZone(key, zone, {
+      image: {
+        ...createDefaultHeaderFooterImage(),
+        ...existing.image,
+        ...patch,
+      },
+    });
   }
 
   function locateProjectAsset(assetId: string) {
@@ -2261,9 +2326,7 @@ export function App() {
       tokenContext: getPublishingTokenContext(),
       currentPage: publishingTargetContext.currentPage ?? currentPage,
       selectedPageIds: publishingTargetContext.selectedPageIds ?? selectedPageIds,
-      imageAssets: marks
-        .filter((mark) => (mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl)
-        .map((mark) => ({ id: mark.id, dataUrl: mark.imageDataUrl, mimeType: mark.imageMimeType })),
+      imageAssets: publishingImageAssets,
       layer: "watermark",
     });
 
@@ -2458,9 +2521,7 @@ export function App() {
       tokenContext: getPublishingTokenContext(),
       currentPage: publishingTargetContext.currentPage ?? currentPage,
       selectedPageIds: publishingTargetContext.selectedPageIds ?? selectedPageIds,
-      imageAssets: marks
-        .filter((mark) => (mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl)
-        .map((mark) => ({ id: mark.id, dataUrl: mark.imageDataUrl, mimeType: mark.imageMimeType })),
+      imageAssets: publishingImageAssets,
       layer: "foreground",
     });
 
@@ -3038,25 +3099,20 @@ export function App() {
                   <summary>Headers & Footers</summary>
                   <label className="checkbox-row"><input type="checkbox" checked={publishingSettings.headerFooter.enabled} onChange={(event) => { const enabled = event.currentTarget.checked; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, enabled } })); }} />Enable headers and footers</label>
                   <label className="checkbox-row"><input type="checkbox" checked={publishingSettings.headerFooter.advanced} onChange={(event) => { const advanced = event.currentTarget.checked; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, advanced } })); }} />Advanced odd/even/first page mode</label>
-                  <label>Header left<input value={publishingSettings.headerFooter.header.left.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, header: { ...settings.headerFooter.header, left: { text } } } }), false); }} /></label>
-                  <label>Header centre<input value={publishingSettings.headerFooter.header.center.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, header: { ...settings.headerFooter.header, center: { text } } } }), false); }} /></label>
-                  <label>Header right<input value={publishingSettings.headerFooter.header.right.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, header: { ...settings.headerFooter.header, right: { text } } } }), false); }} /></label>
-                  <label>Footer left<input value={publishingSettings.headerFooter.footer.left.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, footer: { ...settings.headerFooter.footer, left: { text } } } }), false); }} /></label>
-                  <label>Footer centre<input value={publishingSettings.headerFooter.footer.center.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, footer: { ...settings.headerFooter.footer, center: { text } } } }), false); }} /></label>
-                  <label>Footer right<input value={publishingSettings.headerFooter.footer.right.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, footer: { ...settings.headerFooter.footer, right: { text } } } }), false); }} /></label>
+                  <PublishingHeaderFooterZoneControls title="Header left" zone={publishingSettings.headerFooter.header.left} imageAssets={publishingImageAssets} onTextChange={(text) => updateHeaderFooterZone("header", "left", { text })} onImageChange={(patch) => updateHeaderFooterZoneImage("header", "left", patch)} onRemoveImage={() => updateHeaderFooterZone("header", "left", { image: undefined })} onImportImage={() => { setActiveTool("image"); imageInput.current?.click(); }} />
+                  <PublishingHeaderFooterZoneControls title="Header centre" zone={publishingSettings.headerFooter.header.center} imageAssets={publishingImageAssets} onTextChange={(text) => updateHeaderFooterZone("header", "center", { text })} onImageChange={(patch) => updateHeaderFooterZoneImage("header", "center", patch)} onRemoveImage={() => updateHeaderFooterZone("header", "center", { image: undefined })} onImportImage={() => { setActiveTool("image"); imageInput.current?.click(); }} />
+                  <PublishingHeaderFooterZoneControls title="Header right" zone={publishingSettings.headerFooter.header.right} imageAssets={publishingImageAssets} onTextChange={(text) => updateHeaderFooterZone("header", "right", { text })} onImageChange={(patch) => updateHeaderFooterZoneImage("header", "right", patch)} onRemoveImage={() => updateHeaderFooterZone("header", "right", { image: undefined })} onImportImage={() => { setActiveTool("image"); imageInput.current?.click(); }} />
+                  <PublishingHeaderFooterZoneControls title="Footer left" zone={publishingSettings.headerFooter.footer.left} imageAssets={publishingImageAssets} onTextChange={(text) => updateHeaderFooterZone("footer", "left", { text })} onImageChange={(patch) => updateHeaderFooterZoneImage("footer", "left", patch)} onRemoveImage={() => updateHeaderFooterZone("footer", "left", { image: undefined })} onImportImage={() => { setActiveTool("image"); imageInput.current?.click(); }} />
+                  <PublishingHeaderFooterZoneControls title="Footer centre" zone={publishingSettings.headerFooter.footer.center} imageAssets={publishingImageAssets} onTextChange={(text) => updateHeaderFooterZone("footer", "center", { text })} onImageChange={(patch) => updateHeaderFooterZoneImage("footer", "center", patch)} onRemoveImage={() => updateHeaderFooterZone("footer", "center", { image: undefined })} onImportImage={() => { setActiveTool("image"); imageInput.current?.click(); }} />
+                  <PublishingHeaderFooterZoneControls title="Footer right" zone={publishingSettings.headerFooter.footer.right} imageAssets={publishingImageAssets} onTextChange={(text) => updateHeaderFooterZone("footer", "right", { text })} onImageChange={(patch) => updateHeaderFooterZoneImage("footer", "right", patch)} onRemoveImage={() => updateHeaderFooterZone("footer", "right", { image: undefined })} onImportImage={() => { setActiveTool("image"); imageInput.current?.click(); }} />
                   {publishingSettings.headerFooter.advanced ? (
                     <PublishingAdvancedHeaderFooterControls
                       settings={publishingSettings}
-                      onChange={(key, zone, value) => updatePublishingSettings((settings) => ({
-                        ...settings,
-                        headerFooter: {
-                          ...settings.headerFooter,
-                          [key]: {
-                            ...(settings.headerFooter[key] ?? {}),
-                            [zone]: value,
-                          },
-                        },
-                      }), false)}
+                      imageAssets={publishingImageAssets}
+                      onTextChange={(key, zone, text) => updateHeaderFooterOverrideZone(key, zone, { text })}
+                      onImageChange={updateHeaderFooterOverrideImage}
+                      onRemoveImage={(key, zone) => updateHeaderFooterOverrideZone(key, zone, { image: undefined })}
+                      onImportImage={() => { setActiveTool("image"); imageInput.current?.click(); }}
                     />
                   ) : null}
                   <div className="page-field-grid">
@@ -3246,7 +3302,9 @@ export function App() {
                     currentPage,
                     selectedPageIds,
                     tokenContext: getPublishingTokenContext(),
+                    imageAssetIds: publishingImageAssets.map((asset) => asset.id),
                   })}
+                  publishingImageAssets={publishingImageAssets}
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
                   onAddTextBox={addTextBox}
@@ -4336,6 +4394,7 @@ function DocumentPage({
   penOpacity,
   pendingSignature,
   publishingPreviewItems,
+  publishingImageAssets,
   onSelect,
   onAddMark,
   onAddTextBox,
@@ -4361,6 +4420,7 @@ function DocumentPage({
   penOpacity: number;
   pendingSignature: PreparedImage | null;
   publishingPreviewItems: ReturnType<typeof getPublishingPreviewItems>;
+  publishingImageAssets: Array<{ id: string; name: string; dataUrl?: string; mimeType?: string }>;
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
   onAddTextBox: (page: number, x: number, y: number, width?: number, height?: number) => void;
@@ -4622,8 +4682,9 @@ function DocumentPage({
       ) : null}
       {publishingPreviewItems.length > 0 ? (
         <div className="publishing-preview-layer" aria-hidden="true">
-          {publishingPreviewItems.map((item) =>
-            item.kind === "safeArea" ? (
+          {publishingPreviewItems.map((item) => {
+            const imageAsset = item.assetId ? publishingImageAssets.find((asset) => asset.id === item.assetId) : undefined;
+            return item.kind === "safeArea" ? (
               <div
                 key={item.id}
                 className="publishing-safe-area"
@@ -4634,6 +4695,35 @@ function DocumentPage({
                   height: (item.height ?? 0) * zoom,
                 }}
               />
+            ) : item.kind === "image" && imageAsset?.dataUrl ? (
+              <img
+                key={item.id}
+                className="publishing-preview-image"
+                src={imageAsset.dataUrl}
+                alt=""
+                style={{
+                  left: item.x * zoom,
+                  top: item.y * zoom,
+                  width: (item.width ?? 0) * zoom,
+                  height: (item.height ?? 0) * zoom,
+                  opacity: item.opacity ?? 1,
+                  transform: `translate(${item.align === "center" ? "-50%" : item.align === "right" ? "-100%" : "0"}, -50%)`,
+                }}
+              />
+            ) : item.kind === "missingImage" ? (
+              <div
+                key={item.id}
+                className="publishing-missing-image"
+                style={{
+                  left: item.x * zoom,
+                  top: item.y * zoom,
+                  width: (item.width ?? 0) * zoom,
+                  height: (item.height ?? 0) * zoom,
+                  transform: `translate(${item.align === "center" ? "-50%" : item.align === "right" ? "-100%" : "0"}, -50%)`,
+                }}
+              >
+                Missing image
+              </div>
             ) : (
               <div
                 key={item.id}
@@ -4653,8 +4743,8 @@ function DocumentPage({
               >
                 {item.text}
               </div>
-            )
-          )}
+            );
+          })}
         </div>
       ) : null}
       {draftTextSelection ? (
@@ -5130,6 +5220,14 @@ const watermarkPositionOptions: Array<{ value: PublishingPositionPreset; label: 
   { value: "custom", label: "Custom" },
 ];
 
+const publishingImageLayoutOptions: Array<{ value: PublishingZoneImageLayout; label: string }> = [
+  { value: "imageOnly", label: "Image only" },
+  { value: "textBeforeImage", label: "Text before image" },
+  { value: "imageBeforeText", label: "Image before text" },
+  { value: "imageAboveText", label: "Image above text" },
+  { value: "textAboveImage", label: "Text above image" },
+];
+
 function PublishingTargetControls({
   target,
   pageCount,
@@ -5170,12 +5268,98 @@ function PublishingTargetControls({
   );
 }
 
+function PublishingHeaderFooterZoneControls({
+  title,
+  zone,
+  imageAssets,
+  onTextChange,
+  onImageChange,
+  onRemoveImage,
+  onImportImage,
+}: {
+  title: string;
+  zone: HeaderFooterZone;
+  imageAssets: Array<{ id: string; name: string; dataUrl?: string; mimeType?: string }>;
+  onTextChange: (text: string) => void;
+  onImageChange: (patch: Partial<HeaderFooterZoneImage>) => void;
+  onRemoveImage: () => void;
+  onImportImage: () => void;
+}) {
+  const image = zone.image;
+  const selectedAssetId = image?.assetId ?? "";
+  const hasMissingAsset = Boolean(selectedAssetId && !imageAssets.some((asset) => asset.id === selectedAssetId));
+  return (
+    <details className="publishing-zone-control">
+      <summary>{title}</summary>
+      <label>
+        Text
+        <input value={zone.text} onChange={(event) => onTextChange(event.currentTarget.value)} placeholder="{project}, {date}, custom text..." />
+      </label>
+      <label>
+        Image/logo
+        <select
+          value={selectedAssetId}
+          onChange={(event) => {
+            const assetId = event.currentTarget.value || undefined;
+            onImageChange({ assetId });
+          }}
+        >
+          <option value="">No image</option>
+          {hasMissingAsset ? <option value={selectedAssetId}>Missing asset: {selectedAssetId}</option> : null}
+          {imageAssets.map((asset) => (
+            <option key={asset.id} value={asset.id}>{asset.name}</option>
+          ))}
+        </select>
+      </label>
+      <div className="publishing-zone-actions">
+        <button type="button" className="link-button" onClick={onImportImage}>Import image</button>
+        <button type="button" className="link-button" onClick={onRemoveImage} disabled={!image}>Remove image</button>
+      </div>
+      {hasMissingAsset ? <p className="field-error" role="alert">This image asset is missing. Replace or remove it before export.</p> : null}
+      {image?.assetId ? (
+        <div className="publishing-zone-image-options">
+          <label>Layout<select value={image.layout} onChange={(event) => onImageChange({ layout: event.currentTarget.value as PublishingZoneImageLayout })}>{publishingImageLayoutOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          <div className="page-field-grid">
+            <label>Width<input type="number" min="1" value={image.width} onChange={(event) => onImageChange({ width: Math.max(1, Number(event.currentTarget.value) || 1) })} /></label>
+            <label>Height<input type="number" min="1" value={image.height} onChange={(event) => onImageChange({ height: Math.max(1, Number(event.currentTarget.value) || 1) })} /></label>
+          </div>
+          <div className="page-field-grid">
+            <label>Max width<input type="number" min="1" value={image.maxWidth} onChange={(event) => onImageChange({ maxWidth: Math.max(1, Number(event.currentTarget.value) || 1) })} /></label>
+            <label>Max height<input type="number" min="1" value={image.maxHeight} onChange={(event) => onImageChange({ maxHeight: Math.max(1, Number(event.currentTarget.value) || 1) })} /></label>
+          </div>
+          <div className="page-field-grid">
+            <label>Opacity<input type="number" min="0.05" max="1" step="0.05" value={image.opacity} onChange={(event) => onImageChange({ opacity: clamp(Number(event.currentTarget.value), 0.05, 1) })} /></label>
+            <label>Padding<input type="number" min="0" value={image.padding} onChange={(event) => onImageChange({ padding: Math.max(0, Number(event.currentTarget.value) || 0) })} /></label>
+          </div>
+          <div className="page-field-grid">
+            <label>Offset X<input type="number" value={image.offsetX} onChange={(event) => onImageChange({ offsetX: Number(event.currentTarget.value) || 0 })} /></label>
+            <label>Offset Y<input type="number" value={image.offsetY} onChange={(event) => onImageChange({ offsetY: Number(event.currentTarget.value) || 0 })} /></label>
+          </div>
+          <div className="page-field-grid">
+            <label>Horizontal<select value={image.horizontalAlign} onChange={(event) => onImageChange({ horizontalAlign: event.currentTarget.value as HeaderFooterZoneImage["horizontalAlign"] })}><option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option></select></label>
+            <label>Vertical<select value={image.verticalAlign} onChange={(event) => onImageChange({ verticalAlign: event.currentTarget.value as HeaderFooterZoneImage["verticalAlign"] })}><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></label>
+          </div>
+          <label className="checkbox-row"><input type="checkbox" checked={image.maintainAspectRatio} onChange={(event) => onImageChange({ maintainAspectRatio: event.currentTarget.checked })} />Maintain aspect ratio</label>
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
 function PublishingAdvancedHeaderFooterControls({
   settings,
-  onChange,
+  imageAssets,
+  onTextChange,
+  onImageChange,
+  onRemoveImage,
+  onImportImage,
 }: {
   settings: PublishingSettings;
-  onChange: (key: "firstPage" | "oddPage" | "evenPage", zone: PublishingZone, value: string) => void;
+  imageAssets: Array<{ id: string; name: string; dataUrl?: string; mimeType?: string }>;
+  onTextChange: (key: "firstPage" | "oddPage" | "evenPage", zone: PublishingZone, value: string) => void;
+  onImageChange: (key: "firstPage" | "oddPage" | "evenPage", zone: PublishingZone, patch: Partial<HeaderFooterZoneImage>) => void;
+  onRemoveImage: (key: "firstPage" | "oddPage" | "evenPage", zone: PublishingZone) => void;
+  onImportImage: () => void;
 }) {
   const groups: Array<{ key: "firstPage" | "oddPage" | "evenPage"; title: string }> = [
     { key: "firstPage", title: "First page overrides" },
@@ -5188,14 +5372,16 @@ function PublishingAdvancedHeaderFooterControls({
         <details key={group.key} className="publishing-advanced-group">
           <summary>{group.title}</summary>
           {publishingZoneOptions.map((zone) => (
-            <label key={`${group.key}-${zone.value}`}>
-              {zone.label}
-              <input
-                value={settings.headerFooter[group.key]?.[zone.value] ?? ""}
-                onChange={(event) => onChange(group.key, zone.value, event.currentTarget.value)}
-                placeholder="Leave blank to use default"
-              />
-            </label>
+            <PublishingHeaderFooterZoneControls
+              key={`${group.key}-${zone.value}`}
+              title={zone.label}
+              zone={mergeHeaderFooterZone(settings.headerFooter[group.key]?.[zone.value])}
+              imageAssets={imageAssets}
+              onTextChange={(text) => onTextChange(group.key, zone.value, text)}
+              onImageChange={(patch) => onImageChange(group.key, zone.value, patch)}
+              onRemoveImage={() => onRemoveImage(group.key, zone.value)}
+              onImportImage={onImportImage}
+            />
           ))}
         </details>
       ))}

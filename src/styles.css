@@ -4629,6 +4629,26 @@ nav.left-nav.workspace-nav .workspace-button {
   user-select: none;
 }
 
+.publishing-preview-image,
+.publishing-missing-image {
+  position: absolute;
+  object-fit: contain;
+  transform-origin: center center;
+  user-select: none;
+}
+
+.publishing-missing-image {
+  display: grid;
+  place-items: center;
+  border: 1px dashed #d8342a;
+  border-radius: 4px;
+  background: rgb(216 52 42 / 0.08);
+  color: #c92f27;
+  font-size: 10px;
+  font-weight: 800;
+  text-align: center;
+}
+
 .publishing-watermark {
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -4736,6 +4756,7 @@ nav.left-nav.workspace-nav .workspace-button {
   gap: 8px;
 }
 
+.publishing-zone-control,
 .publishing-advanced-group {
   display: grid;
   gap: 8px;
@@ -4744,8 +4765,22 @@ nav.left-nav.workspace-nav .workspace-button {
   background: rgb(248 250 252 / 0.72);
 }
 
+.publishing-zone-control summary,
 .publishing-advanced-group summary {
   font-size: 12px;
+}
+
+.publishing-zone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.publishing-zone-image-options {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgb(148 163 184 / 0.16);
 }
 
 .publishing-target-controls label:first-child,
@@ -4814,6 +4849,11 @@ nav.left-nav.workspace-nav .workspace-button {
   background: rgb(15 23 42 / 0.42);
 }
 
+:root[data-theme="dark"] .publishing-zone-control,
 :root[data-theme="dark"] .publishing-advanced-group {
   background: rgb(15 23 42 / 0.42);
+}
+
+:root[data-theme="dark"] .publishing-zone-image-options {
+  border-top-color: rgb(148 163 184 / 0.14);
 }
