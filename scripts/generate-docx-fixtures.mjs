@@ -54,14 +54,62 @@ const fixtures = [
   {
     name: "review.docx",
     extraFiles: {
-      "word/comments.xml": xml(`<w:comments xmlns:w="${W}"><w:comment w:id="0" w:author="Publish Pro"><w:p><w:r><w:t>Review comment fixture</w:t></w:r></w:p></w:comment></w:comments>`),
+      "word/comments.xml": xml(`<w:comments xmlns:w="${W}"><w:comment w:id="0" w:author="Publish Pro" w:initials="PP" w:date="2026-07-22T10:00:00Z"><w:p><w:r><w:t>Review comment fixture</w:t></w:r></w:p></w:comment></w:comments>`),
       "word/footnotes.xml": xml(`<w:footnotes xmlns:w="${W}"><w:footnote w:id="1"><w:p><w:r><w:t>Footnote fixture text</w:t></w:r></w:p></w:footnote></w:footnotes>`),
     },
     body: [
       heading("Review Fixture", 1),
-      paragraph("Paragraph with footnote reference."),
-      `<w:p><w:ins><w:r><w:t>Inserted text</w:t></w:r></w:ins><w:del><w:r><w:t>Deleted text</w:t></w:r></w:del></w:p>`,
+      `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Paragraph with footnote reference and comment.</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`,
+      `<w:p><w:ins w:id="1" w:author="Reviewer A" w:date="2026-07-22T11:00:00Z"><w:r><w:t>Inserted text</w:t></w:r></w:ins><w:del w:id="2" w:author="Reviewer B" w:date="2026-07-22T12:00:00Z"><w:r><w:t>Deleted text</w:t></w:r></w:del></w:p>`,
     ].join(""),
+  },
+  {
+    name: "notes.docx",
+    relationships: `<Relationship Id="rIdNoteHyper1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/note" TargetMode="External"/>`,
+    extraFiles: {
+      "word/_rels/footnotes.xml.rels": xml(`<Relationships xmlns="${R}"><Relationship Id="rIdNoteHyper1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/note" TargetMode="External"/></Relationships>`),
+      "word/footnotes.xml": xml(`<w:footnotes xmlns:w="${W}" xmlns:r="${OR}"><w:footnote w:id="1"><w:p><w:r><w:t>First footnote text.</w:t></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:hyperlink r:id="rIdNoteHyper1"><w:r><w:t>Footnote hyperlink</w:t></w:r></w:hyperlink><w:r><w:t> and long explanatory note text that should wrap in the note area.</w:t></w:r></w:p></w:footnote></w:footnotes>`),
+      "word/endnotes.xml": xml(`<w:endnotes xmlns:w="${W}"><w:endnote w:id="1"><w:p><w:r><w:t>Endnote fixture text.</w:t></w:r></w:p></w:endnote></w:endnotes>`),
+    },
+    body: [
+      heading("Notes Fixture", 1),
+      `<w:p><w:r><w:t>First paragraph with footnote.</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`,
+      `<w:p><w:r><w:t>Second paragraph with another footnote.</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>`,
+      `<w:p><w:r><w:t>Paragraph with endnote.</w:t></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>`,
+    ].join(""),
+  },
+  {
+    name: "internal-navigation.docx",
+    body: [
+      heading("Internal Navigation Fixture", 1),
+      `<w:p><w:hyperlink w:anchor="TargetBookmark"><w:r><w:rPr><w:u w:val="single"/><w:color w:val="2563EB"/></w:rPr><w:t>Jump to target bookmark</w:t></w:r></w:hyperlink></w:p>`,
+      pageBreak(),
+      `<w:p><w:bookmarkStart w:id="7" w:name="TargetBookmark"/><w:r><w:t>Target bookmark paragraph</w:t></w:r><w:bookmarkEnd w:id="7"/></w:p>`,
+      heading("Duplicate Visible Title", 2),
+      heading("Duplicate Visible Title", 2),
+    ].join(""),
+  },
+  {
+    name: "numbering.docx",
+    body: [
+      heading("Cover", 1),
+      sectionBreakWithNumbering("lowerRoman", 1),
+      heading("Front Matter", 1),
+      pageBreak(),
+      sectionBreakWithNumbering("decimal", 1),
+      heading("Main Report", 1),
+      pageBreak(),
+      sectionBreakWithNumbering("upperLetter", 1),
+      heading("Appendix", 1),
+    ].join(""),
+  },
+  {
+    name: "reimport-original.docx",
+    body: [heading("Re-import Original", 1), paragraph("Original paragraph."), table([["A", "B"], ["1", "2"]])].join(""),
+  },
+  {
+    name: "reimport-updated.docx",
+    body: [heading("Re-import Updated", 1), paragraph("Updated paragraph with an added page."), pageBreak(), heading("Added Page", 1), table([["A", "B"], ["3", "4"]])].join(""),
   },
   {
     name: "media-links.docx",
@@ -95,8 +143,15 @@ function createDocx(fixture) {
 }
 
 function contentTypes(extraFiles) {
-  const extras = extraFiles ? Object.keys(extraFiles).map((path) => `<Override PartName="/${path}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${path.includes("comment") ? "comments" : "footnotes"}+xml"/>`).join("") : "";
+  const extras = extraFiles ? Object.keys(extraFiles).filter((path) => !path.endsWith(".rels")).map((path) => `<Override PartName="/${path}" ContentType="${contentTypeFor(path)}"/>`).join("") : "";
   return xml(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>${extras}</Types>`);
+}
+
+function contentTypeFor(path) {
+  if (path.includes("comments")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml";
+  if (path.includes("endnotes")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
+  if (path.includes("footnotes")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+  return "application/xml";
 }
 
 function documentXml(fixture) {
@@ -130,6 +185,10 @@ function table(rows) {
 
 function pageBreak() {
   return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+}
+
+function sectionBreakWithNumbering(format, start) {
+  return `<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/><w:pgNumType w:fmt="${format}" w:start="${start}"/></w:sectPr></w:pPr></w:p>`;
 }
 
 function xml(value) {

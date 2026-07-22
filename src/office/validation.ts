@@ -10,7 +10,7 @@ export const defaultDocxImportOptions: DocxImportOptions = {
   rebuildTocFromHeadings: true,
   fallbackPageSize: "letter",
   fallbackFont: "Helvetica",
-  trackedChangesMode: "accepted",
+  trackedChangesMode: "acceptAll",
 };
 
 export function validateDocxImportFile(file: File) {

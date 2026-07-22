@@ -125,7 +125,7 @@ import type { DocumentBookmark, NavigationState, PageReference, TocGeneratedPage
 import { createBookmarksFromDocxHeadings } from "./office/docxBookmarks";
 import { importDocxDocument } from "./office/docxImport";
 import { defaultDocxImportOptions, validateDocxImportFile } from "./office/validation";
-import type { DocxImportMetadata, DocxImportOptions, DocxImportReport, DocxSourceMapping } from "./office/types";
+import type { DocxImportMetadata, DocxImportOptions, DocxImportReport, DocxSectionNumbering, DocxSourceMapping, DocxWordComment } from "./office/types";
 import {
   addRecentProject,
   clearRecentProjects,
@@ -285,6 +285,15 @@ type MergeQueueItem = {
   pageCount: number;
   range: string;
   error?: string;
+};
+
+type DocxReimportImpact = {
+  currentPages: number;
+  currentBookmarks: number;
+  manualAnnotationsAffected: number;
+  commentsAffected: number;
+  manualBookmarksPreserved: number;
+  publishingSettingsPreserved: boolean;
 };
 
 type PageContextMenuState = {
@@ -460,6 +469,19 @@ export function App() {
     }
     return Array.from(groups.values());
   }, [pages]);
+  const docxReimportImpact = useMemo<DocxReimportImpact | null>(() => {
+    if (!docxReimportTarget) return null;
+    const importedPageIds = pages.filter((page) => page.importMetadata?.importId === docxReimportTarget.importId).map((page) => page.id);
+    const importedPageIdSet = new Set(importedPageIds);
+    return {
+      currentPages: importedPageIds.length,
+      currentBookmarks: bookmarks.filter((bookmark) => importedPageIdSet.has(bookmark.pageId)).length,
+      manualAnnotationsAffected: marks.filter((mark) => mark.pageId && importedPageIdSet.has(mark.pageId) && !mark.comment?.title?.startsWith("Word comment")).length,
+      commentsAffected: marks.filter((mark) => mark.kind === "comment" && mark.pageId && importedPageIdSet.has(mark.pageId)).length,
+      manualBookmarksPreserved: bookmarks.filter((bookmark) => !importedPageIdSet.has(bookmark.pageId)).length,
+      publishingSettingsPreserved: true,
+    };
+  }, [bookmarks, docxReimportTarget, marks, pages]);
   const selectedPageCount = selectedPageIds.filter((id) => pages.some((page) => page.id === id)).length;
   const activePageIds = selectedPageIds.length > 0 ? selectedPageIds.filter((id) => pages.some((page) => page.id === id)) : currentPageView ? [currentPageView.id] : [];
   const pageAnnotations = useMemo(() => countAnnotationsByPageId(marks, pages), [marks, pages]);
@@ -1365,11 +1387,10 @@ export function App() {
       setErrorMessage("The original DOCX source is missing from this project. Re-import cannot continue until the source is restored.");
       return;
     }
-    if (!window.confirm("Re-import this Word source? Generated imported pages may be replaced. Manual annotations are preserved where page order still matches.")) return;
     const file = new File([source.bytes.slice()], source.name, { type: source.mimeType });
     setPendingDocxFile(file);
     setDocxImportMode("append");
-    setDocxImportOptions(metadata.options ?? defaultDocxImportOptions);
+    setDocxImportOptions(normalizeDocxImportOptions(metadata.options ?? defaultDocxImportOptions));
     setDocxReimportTarget(metadata);
     setErrorMessage("");
   }
@@ -1402,6 +1423,18 @@ export function App() {
       }
       const pageIdsByNumber = new Map(importedPages.map((page) => [page.sourcePageNumber ?? page.pageNumber, page.id]));
       const importedBookmarks = docxImportOptions.createBookmarks ? createBookmarksFromDocxHeadings(result.headings, pageIdsByNumber) : [];
+      const importMetadata = docxReimportTarget
+        ? { ...result.importMetadata, revisionHistory: mergeDocxRevisionHistory(result.importMetadata, docxReimportTarget) }
+        : result.importMetadata;
+      const importedCommentMarks = createWordCommentMarks(result.wordComments, importedPages);
+      const importedNumberingSections = createDocxNumberingSections(result.sectionNumbering, importedPages);
+      const importedReport = {
+        ...result.report,
+        bookmarksCreated: importedBookmarks.length,
+        commentsImported: importedCommentMarks.length,
+        sectionNumberingDetected: importedNumberingSections.length || result.report.sectionNumberingDetected,
+        revision: importMetadata.revisionHistory[0] ?? result.report.revision,
+      };
       const imageAssets = result.imageAssets
         .filter((image): image is typeof image & { mimeType: "image/png" | "image/jpeg" } => image.mimeType === "image/png" || image.mimeType === "image/jpeg")
         .map<ProjectImageAsset>((image) => ({
@@ -1420,7 +1453,7 @@ export function App() {
           name: result.convertedPdfSource.name,
           bytes: result.convertedPdfSource.bytes,
           mimeType: result.convertedPdfSource.mimeType,
-          importMetadata: result.importMetadata,
+          importMetadata,
         },
       };
       if (result.originalSource) {
@@ -1429,9 +1462,12 @@ export function App() {
           name: result.originalSource.name,
           bytes: result.originalSource.bytes,
           mimeType: result.originalSource.mimeType,
-          importMetadata: result.importMetadata,
+          importMetadata,
         };
       }
+      importedPages.forEach((page) => {
+        page.importMetadata = importMetadata;
+      });
 
       if (docxReimportTarget && hasOpenProject) {
         const targetPageIndexes = pages
@@ -1450,16 +1486,19 @@ export function App() {
         }).filter((mark) => !mark.pageId || !replacedPageIds.includes(mark.pageId) || oldToNewPageId.has(mark.pageId));
         setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
         setProjectImageAssets((existing) => [...existing, ...imageAssets.filter((asset) => !existing.some((item) => item.dataUrl === asset.dataUrl))]);
-        commitDocument(nextPages, nextMarks, null, insertIndex + 1, importedPages.map((page) => page.id));
-        commitNavigation({ bookmarks: [...bookmarks.filter((bookmark) => !replacedPageIds.includes(bookmark.pageId)), ...importedBookmarks] });
+        commitDocument(nextPages, [...nextMarks, ...importedCommentMarks], null, insertIndex + 1, importedPages.map((page) => page.id));
+        commitNavigation({
+          bookmarks: [...bookmarks.filter((bookmark) => !replacedPageIds.includes(bookmark.pageId)), ...importedBookmarks],
+          numberingSections: [...numberingSections.filter((section) => !replacedPageIds.includes(section.startPageId)), ...importedNumberingSections],
+        });
         setProjectStatusMessage(`Re-imported Word source ${pendingDocxFile.name}. Manual page annotations were preserved where page order still matched.`);
       } else if (docxImportMode === "append" && hasOpenProject) {
         const insertIndex = getPageInsertionIndex("after");
         const nextPages = renumberPages([...pages.slice(0, insertIndex), ...importedPages, ...pages.slice(insertIndex)]);
         setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
         setProjectImageAssets((existing) => [...existing, ...imageAssets.filter((asset) => !existing.some((item) => item.dataUrl === asset.dataUrl))]);
-        commitDocument(nextPages, marks, null, insertIndex + 1, importedPages.map((page) => page.id));
-        commitNavigation({ bookmarks: [...bookmarks, ...importedBookmarks] });
+        commitDocument(nextPages, [...marks, ...importedCommentMarks], null, insertIndex + 1, importedPages.map((page) => page.id));
+        commitNavigation({ bookmarks: [...bookmarks, ...importedBookmarks], numberingSections: [...numberingSections, ...importedNumberingSections] });
         setProjectStatusMessage(`Imported Word document ${pendingDocxFile.name} into the current project.`);
       } else {
         const projectName = result.projectName;
@@ -1478,9 +1517,10 @@ export function App() {
         setSourceDocuments(importedSources);
         setProjectImageAssets(imageAssets);
         setPages(importedPages);
-        setMarks([]);
+        setMarks(importedCommentMarks);
         resetNavigationState();
         setBookmarks(importedBookmarks);
+        setNumberingSections(importedNumberingSections);
         setPublishingSettings(result.publishingSettingsPatch ?? createDefaultPublishingSettings());
         setPublishingHistory({ past: [], future: [] });
         setHistory({ past: [], future: [] });
@@ -1491,7 +1531,7 @@ export function App() {
         setActiveWorkspace("publish");
         setLeftPanel(importedBookmarks.length > 0 ? "bookmarks" : "pages");
       }
-      setDocxImportReport({ ...result.report, bookmarksCreated: importedBookmarks.length });
+      setDocxImportReport(importedReport);
       setPendingDocxFile(null);
       setDocxReimportTarget(null);
       setWorkState(null);
@@ -3374,10 +3414,20 @@ export function App() {
           mode={docxImportMode}
           options={docxImportOptions}
           reimportTarget={docxReimportTarget}
+          reimportImpact={docxReimportImpact}
           hasOpenProject={hasOpenProject}
           isBusy={isBusy}
           onModeChange={setDocxImportMode}
           onOptionsChange={setDocxImportOptions}
+          onReplacementFile={(file) => {
+            try {
+              validateDocxImportFile(file);
+              setPendingDocxFile(file);
+              setErrorMessage("");
+            } catch (error) {
+              setErrorMessage(error instanceof Error ? error.message : "Choose a valid replacement DOCX file.");
+            }
+          }}
           onCancel={() => { setPendingDocxFile(null); setDocxReimportTarget(null); }}
           onImport={() => void confirmDocxImport()}
         />
@@ -6169,10 +6219,12 @@ function DocxImportDialog({
   mode,
   options,
   reimportTarget,
+  reimportImpact,
   hasOpenProject,
   isBusy,
   onModeChange,
   onOptionsChange,
+  onReplacementFile,
   onCancel,
   onImport,
 }: {
@@ -6180,10 +6232,12 @@ function DocxImportDialog({
   mode: "replace" | "append";
   options: DocxImportOptions;
   reimportTarget: DocxImportMetadata | null;
+  reimportImpact: DocxReimportImpact | null;
   hasOpenProject: boolean;
   isBusy: boolean;
   onModeChange: (mode: "replace" | "append") => void;
   onOptionsChange: (options: DocxImportOptions) => void;
+  onReplacementFile: (file: File) => void;
   onCancel: () => void;
   onImport: () => void;
 }) {
@@ -6205,6 +6259,28 @@ function DocxImportDialog({
             <strong>{file.name}</strong>
             <span>{formatAssetSize(file.size)} · DOCX</span>
           </div>
+          {reimportTarget ? (
+            <div className="validation-list">
+              <strong>Re-import impact preview</strong>
+              <div className="validation-row"><span>{reimportImpact?.currentPages ?? 0} imported pages will be replaced after conversion succeeds.</span></div>
+              <div className="validation-row"><span>{reimportImpact?.currentBookmarks ?? 0} imported bookmarks will be regenerated; {reimportImpact?.manualBookmarksPreserved ?? 0} manual bookmarks are preserved.</span></div>
+              <div className="validation-row"><span>{reimportImpact?.manualAnnotationsAffected ?? 0} manual annotations and {reimportImpact?.commentsAffected ?? 0} comments are remapped by page order where possible.</span></div>
+              <div className="validation-row"><span>Publishing settings, project metadata, and unrelated assets are preserved.</span></div>
+              <label>
+                Replacement DOCX
+                <input
+                  type="file"
+                  accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  onChange={(event) => {
+                    const replacement = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    if (replacement) onReplacementFile(replacement);
+                  }}
+                  disabled={isBusy}
+                />
+              </label>
+            </div>
+          ) : null}
           <label>
             Fidelity
             <select value={options.fidelityMode} onChange={(event) => update({ fidelityMode: event.currentTarget.value as DocxImportOptions["fidelityMode"] })}>
@@ -6232,8 +6308,9 @@ function DocxImportDialog({
           <label>
             Tracked changes
             <select value={options.trackedChangesMode} onChange={(event) => update({ trackedChangesMode: event.currentTarget.value as DocxImportOptions["trackedChangesMode"] })}>
-              <option value="accepted">Show accepted result</option>
-              <option value="rejectDeletions">Preserve deleted text where readable</option>
+              <option value="acceptAll">Accept all</option>
+              <option value="rejectAll">Reject all</option>
+              <option value="summary">Preserve review summary</option>
             </select>
           </label>
           <div className="page-field-grid">
@@ -6265,7 +6342,89 @@ function DocxImportDialog({
   );
 }
 
+function normalizeDocxImportOptions(options: DocxImportOptions): DocxImportOptions {
+  const legacyMode = options.trackedChangesMode as DocxImportOptions["trackedChangesMode"] | "accepted" | "rejectDeletions";
+  return {
+    ...defaultDocxImportOptions,
+    ...options,
+    trackedChangesMode: legacyMode === "accepted" ? "acceptAll" : legacyMode === "rejectDeletions" ? "rejectAll" : legacyMode,
+  };
+}
+
+function createWordCommentMarks(wordComments: DocxWordComment[], importedPages: PageView[]): Mark[] {
+  const pagesByNumber = new Map(importedPages.map((page) => [page.pageNumber, page]));
+  const mappingsByBlockId = new Map(importedPages.flatMap((page) => (page.sourceMappings ?? []).map((mapping) => [mapping.blockId, { page, mapping }] as const)));
+  return wordComments.flatMap((wordComment) => {
+    const mapped = wordComment.blockId ? mappingsByBlockId.get(wordComment.blockId) : undefined;
+    const page = mapped?.page ?? pagesByNumber.get(1) ?? importedPages[0];
+    if (!page) return [];
+    const comment = createCommentData(wordComment.date ? new Date(wordComment.date) : new Date(), wordComment.author || "Word reviewer");
+    comment.title = `Word comment ${wordComment.sourceId}`;
+    comment.body = [
+      wordComment.text,
+      "",
+      `Source comment ID: ${wordComment.sourceId}`,
+      wordComment.initials ? `Initials: ${wordComment.initials}` : "",
+      wordComment.sourceText ? `Referenced text: ${wordComment.sourceText}` : "",
+      wordComment.approximate ? "Mapping: approximate" : "Mapping: source range",
+    ].filter(Boolean).join("\n");
+    comment.color = "#60a5fa";
+    return [{
+      id: crypto.randomUUID(),
+      kind: "comment" as const,
+      pageId: page.id,
+      page: page.pageNumber,
+      x: Math.max(16, Math.min(page.width - 32, mapped?.mapping.x ?? page.width - 56)),
+      y: Math.max(16, Math.min(page.height - 32, mapped?.mapping.y ?? 72)),
+      width: 24,
+      height: 24,
+      text: comment.title,
+      color: comment.color,
+      size: 16,
+      rotation: 0,
+      comment,
+    }];
+  });
+}
+
+function createDocxNumberingSections(sections: DocxSectionNumbering[], importedPages: PageView[]): NumberingSection[] {
+  if (sections.length === 0 || importedPages.length === 0) return [];
+  const firstPage = importedPages[0];
+  return sections.map((section, index) => ({
+    id: crypto.randomUUID(),
+    label: index === 0 ? "Word numbering" : `Word numbering ${index + 1}`,
+    startPageId: importedPages[Math.min(index, importedPages.length - 1)]?.id ?? firstPage.id,
+    format: section.format,
+    startValue: Math.max(1, section.startValue),
+    prefix: section.prefix,
+    suffix: "",
+    includeNumbering: !section.unnumbered,
+    includeInTotal: !section.unnumbered,
+    restart: true,
+    usePageLabel: false,
+  }));
+}
+
+function mergeDocxRevisionHistory(next: DocxImportMetadata, previous: DocxImportMetadata) {
+  const nextRevision = next.revisionHistory[0];
+  return [nextRevision, ...(previous.revisionHistory ?? [])].filter(Boolean).slice(0, 2);
+}
+
 function DocxImportReportDialog({ report, onClose }: { report: DocxImportReport; onClose: () => void }) {
+  const categories = Array.from(new Set(report.warnings.map((warning) => warning.category ?? "general")));
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const visibleWarnings = categoryFilter === "all" ? report.warnings : report.warnings.filter((warning) => (warning.category ?? "general") === categoryFilter);
+  const copyReport = () => {
+    void navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
+  };
+  const downloadReport = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `publish-pro-docx-import-${report.importId}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="docx-report-title">
@@ -6285,12 +6444,37 @@ function DocxImportReportDialog({ report, onClose }: { report: DocxImportReport;
             <div><strong>{report.listsImported}</strong><span>Lists</span></div>
             <div><strong>{report.hyperlinksImported}</strong><span>Links</span></div>
             <div><strong>{report.sourceMappings}</strong><span>Mappings</span></div>
+            <div><strong>{report.footnotesDetected + report.endnotesDetected}</strong><span>Notes</span></div>
+            <div><strong>{report.commentsImported}</strong><span>Comments</span></div>
+            <div><strong>{report.trackedChangesDetected}</strong><span>Changes</span></div>
+            <div><strong>{report.sectionNumberingDetected}</strong><span>Numbering</span></div>
           </div>
           <div className="import-review-summary">
             <span>Parse {Math.round(report.parseTimeMs)}ms</span>
             <span>Render {Math.round(report.renderTimeMs)}ms</span>
             <span>Total {Math.round(report.totalTimeMs)}ms</span>
+            <span>{report.trackedChangesMode}</span>
+            <span>Rev {report.revision.sourceHash.slice(0, 8)}</span>
           </div>
+          <div className="import-review-summary">
+            <span>Notes placed {report.notesPlacedExactly}</span>
+            <span>Fallback notes {report.notesUsingFallback}</span>
+            <span>Broken note refs {report.brokenNoteReferences}</span>
+            <span>Internal link fallbacks {report.internalLinkFallbacks}</span>
+          </div>
+          {report.trackedChangeSummary.length > 0 ? (
+            <details className="publishing-section">
+              <summary>Tracked-change review summary</summary>
+              <div className="validation-list">
+                {report.trackedChangeSummary.slice(0, 12).map((change) => (
+                  <div className="validation-row" key={change.id}>
+                    <span><strong>{change.type}</strong>{change.author ? ` by ${change.author}` : ""}: {change.text || "Formatting change"}</span>
+                  </div>
+                ))}
+                {report.trackedChangeSummary.length > 12 ? <p className="dialog-note">{report.trackedChangeSummary.length - 12} additional tracked changes are included in the JSON report.</p> : null}
+              </div>
+            </details>
+          ) : null}
           {report.fontSubstitutions.length > 0 ? (
             <div className="validation-list">
               <strong>Font substitutions</strong>
@@ -6305,11 +6489,17 @@ function DocxImportReportDialog({ report, onClose }: { report: DocxImportReport;
           ) : null}
           {report.warnings.length > 0 ? (
             <div className="validation-list">
-              <strong>Import warnings</strong>
-              {report.warnings.map((warning, index) => (
+              <div className="dialog-actions compact">
+                <strong>Import warnings</strong>
+                <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.currentTarget.value)} aria-label="Filter import warnings">
+                  <option value="all">All warnings</option>
+                  {categories.map((category) => <option value={category} key={category}>{category}</option>)}
+                </select>
+              </div>
+              {visibleWarnings.map((warning, index) => (
                 <div className="validation-row warning" key={`${warning.code}-${index}`}>
                   <AlertTriangle size={15} />
-                  <span>{warning.message}</span>
+                  <span>{warning.message}{warning.pageNumber ? ` Page ${warning.pageNumber}.` : ""}{warning.sourceBlockId ? ` Source block ${warning.sourceBlockId}.` : ""}</span>
                 </div>
               ))}
             </div>
@@ -6317,6 +6507,8 @@ function DocxImportReportDialog({ report, onClose }: { report: DocxImportReport;
             <p className="dialog-note">Import completed without warnings.</p>
           )}
           <div className="dialog-actions">
+            <button className="button ghost" onClick={copyReport}>Copy report</button>
+            <button className="button ghost" onClick={downloadReport}>Download JSON</button>
             <button className="button primary" onClick={onClose}>Done</button>
           </div>
         </div>

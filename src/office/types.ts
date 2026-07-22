@@ -10,7 +10,7 @@ export type DocxImportOptions = {
   rebuildTocFromHeadings: boolean;
   fallbackPageSize: "a4" | "letter" | "legal";
   fallbackFont: "Helvetica" | "Times Roman" | "Courier";
-  trackedChangesMode: "accepted" | "rejectDeletions";
+  trackedChangesMode: "acceptAll" | "rejectAll" | "summary";
 };
 
 export type DocxImportProgress = {
@@ -45,6 +45,12 @@ export type DocxTextRun = {
   hyperlink?: string;
 };
 
+export type DocxNoteReference = {
+  id: string;
+  kind: "footnote" | "endnote";
+  marker: string;
+};
+
 export type DocxParagraphBlock = {
   id: string;
   type: "paragraph";
@@ -74,6 +80,9 @@ export type DocxParagraphBlock = {
     text?: string;
     index: number;
   };
+  noteReferences?: DocxNoteReference[];
+  wordBookmarkNames?: string[];
+  wordCommentIds?: string[];
 };
 
 export type DocxImageBlock = {
@@ -133,6 +142,11 @@ export type DocxRenderedLink = {
   y: number;
   width: number;
   height: number;
+  kind?: "external" | "internal";
+  anchor?: string;
+  destinationPageNumber?: number;
+  destinationBlockId?: string;
+  usedFallbackDestination?: boolean;
 };
 
 export type DocxSourceMapping = {
@@ -163,6 +177,70 @@ export type DocxExtractedImage = {
 export type DocxImportWarning = {
   code: string;
   message: string;
+  category?: "typography" | "pagination" | "tables" | "images" | "hyperlinks" | "footnotes" | "comments" | "trackedChanges" | "sections" | "reimport" | "general";
+  pageNumber?: number;
+  sourceBlockId?: string;
+};
+
+export type DocxNote = {
+  id: string;
+  kind: "footnote" | "endnote";
+  marker: string;
+  text: string;
+  hyperlinks: Array<{ text: string; url: string }>;
+};
+
+export type DocxWordBookmark = {
+  name: string;
+  blockId: string;
+  sourceOrder: number;
+};
+
+export type DocxInternalLink = {
+  blockId: string;
+  anchor: string;
+  text: string;
+  sourceOrder: number;
+};
+
+export type DocxWordComment = {
+  sourceId: string;
+  author: string;
+  initials?: string;
+  date?: string;
+  text: string;
+  blockId?: string;
+  sourceText?: string;
+  approximate: boolean;
+};
+
+export type DocxTrackedChange = {
+  id: string;
+  type: "insertion" | "deletion" | "moveFrom" | "moveTo" | "formatting";
+  author?: string;
+  date?: string;
+  text: string;
+  blockId?: string;
+};
+
+export type DocxSectionNumbering = {
+  blockId: string;
+  sourceOrder: number;
+  startValue: number;
+  format: "decimal" | "romanLower" | "romanUpper" | "alphaLower" | "alphaUpper";
+  prefix: string;
+  unnumbered?: boolean;
+};
+
+export type DocxRevisionMetadata = {
+  revisionId: string;
+  sourceHash: string;
+  importedAt: string;
+  importerVersion: string;
+  fidelityMode: DocxImportOptions["fidelityMode"];
+  trackedChangesMode: DocxImportOptions["trackedChangesMode"];
+  pageCount: number;
+  warningCount: number;
 };
 
 export type DocxIntermediateDocument = {
@@ -174,6 +252,12 @@ export type DocxIntermediateDocument = {
   headerText?: string;
   footerText?: string;
   hyperlinks: Array<{ text: string; url: string }>;
+  notes: DocxNote[];
+  wordBookmarks: DocxWordBookmark[];
+  internalLinks: DocxInternalLink[];
+  wordComments: DocxWordComment[];
+  trackedChanges: DocxTrackedChange[];
+  sectionNumbering: DocxSectionNumbering[];
   statistics: {
     paragraphCount: number;
     tableCount: number;
@@ -184,6 +268,13 @@ export type DocxIntermediateDocument = {
     commentsDetected?: number;
     trackedChangesDetected?: number;
     sectionCount?: number;
+    notesPlacedExactly?: number;
+    notesUsingFallback?: number;
+    brokenNoteReferences?: number;
+    internalLinksDetected?: number;
+    internalLinksMapped?: number;
+    commentsImported?: number;
+    approximateComments?: number;
   };
   warnings: DocxImportWarning[];
 };
@@ -208,8 +299,20 @@ export type DocxImportReport = {
   hyperlinksImported: number;
   headersFootersDetected: number;
   footnotesDetected: number;
+  endnotesDetected: number;
+  notesPlacedExactly: number;
+  notesUsingFallback: number;
+  brokenNoteReferences: number;
   commentsDetected: number;
+  commentsImported: number;
+  approximateComments: number;
   trackedChangesDetected: number;
+  trackedChangesMode: DocxImportOptions["trackedChangesMode"];
+  trackedChangeSummary: DocxTrackedChange[];
+  internalLinksImported: number;
+  internalLinkFallbacks: number;
+  sectionNumberingDetected: number;
+  revision: DocxRevisionMetadata;
   fontSubstitutions: string[];
   layoutSimplifications: string[];
   sourceMappings: number;
@@ -230,6 +333,8 @@ export type DocxImportResult = {
   bookmarks: DocumentBookmark[];
   links: DocxRenderedLink[];
   sourceMappings: DocxSourceMapping[];
+  wordComments: DocxWordComment[];
+  sectionNumbering: DocxSectionNumbering[];
   importMetadata: DocxImportMetadata;
   publishingSettingsPatch?: PublishingSettings;
   report: DocxImportReport;
@@ -245,4 +350,5 @@ export type DocxImportMetadata = {
   options: DocxImportOptions;
   pageCount: number;
   warningCount: number;
+  revisionHistory: DocxRevisionMetadata[];
 };

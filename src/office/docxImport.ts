@@ -41,13 +41,19 @@ export async function importDocxDocument(file: File, options: DocxImportOptions,
     headerText: headerFooter.headerText,
     footerText: headerFooter.footerText,
     hyperlinks: content.hyperlinks,
+    notes: content.notes,
+    wordBookmarks: content.wordBookmarks,
+    internalLinks: content.internalLinks,
+    wordComments: content.wordComments,
+    trackedChanges: content.trackedChanges,
+    sectionNumbering: content.sectionNumbering,
     statistics: { ...content.statistics, imageCount: images.length },
     warnings,
   };
 
   if (images.some((image) => image.mimeType === "image/gif")) warnings.push({ code: "gif-fallback", message: "GIF images are preserved as Project Assets; first-phase PDF rendering does not animate or embed GIF frames." });
   if (images.some((image) => image.mimeType === "image/svg+xml")) warnings.push({ code: "svg-fallback", message: "SVG images are preserved as Project Assets; first-phase PDF rendering skips SVG placement when pdf-lib cannot embed them directly." });
-  if (content.hyperlinks.some((link) => !/^https?:\/\//i.test(link.url) && !/^mailto:/i.test(link.url))) warnings.push({ code: "internal-hyperlink-fallback", message: "Some internal Word hyperlinks were detected. External web and email links are exported as clickable PDF link annotations; internal heading links need a later mapping pass." });
+  if (content.internalLinks.length > 0 && content.wordBookmarks.length === 0) warnings.push({ code: "internal-hyperlink-fallback", category: "hyperlinks", message: "Some internal Word hyperlinks were detected without matching bookmark markers. They will target the top of the document when no heading or bookmark can be resolved." });
 
   onProgress?.({ stage: "Paginating Word content", progress: 62 });
   const renderStartedAt = performance.now();
@@ -73,6 +79,17 @@ export async function importDocxDocument(file: File, options: DocxImportOptions,
   const convertedSourceId = crypto.randomUUID();
   const originalSourceId = options.preserveSource ? crypto.randomUUID() : undefined;
   const importedAt = new Date().toISOString();
+  const sourceHash = await hashBytes(originalBytes);
+  const revision = {
+    revisionId: crypto.randomUUID(),
+    sourceHash,
+    importedAt,
+    importerVersion: "docx-import-v2",
+    fidelityMode: options.fidelityMode,
+    trackedChangesMode: options.trackedChangesMode,
+    pageCount: rendered.pageCount,
+    warningCount: warnings.length,
+  };
   const fontSubstitutions = warnings.filter((warning) => warning.code === "font-substitution").map((warning) => warning.message);
   const layoutSimplifications = warnings.filter((warning) => warning.code.includes("fallback") || warning.code.includes("simplified") || warning.code === "table-scaled").map((warning) => warning.message);
 
@@ -98,6 +115,8 @@ export async function importDocxDocument(file: File, options: DocxImportOptions,
     bookmarks,
     links: rendered.links,
     sourceMappings: rendered.sourceMappings,
+    wordComments: content.wordComments,
+    sectionNumbering: content.sectionNumbering,
     importMetadata: {
       importId,
       sourceDocumentId: convertedSourceId,
@@ -108,6 +127,7 @@ export async function importDocxDocument(file: File, options: DocxImportOptions,
       options,
       pageCount: rendered.pageCount,
       warningCount: warnings.length,
+      revisionHistory: [revision],
     },
     publishingSettingsPatch: publishingSettings,
     report: {
@@ -123,8 +143,20 @@ export async function importDocxDocument(file: File, options: DocxImportOptions,
       hyperlinksImported: rendered.links.length,
       headersFootersDetected: [headerFooter.headerText, headerFooter.footerText].filter(Boolean).length,
       footnotesDetected: content.statistics.footnoteCount,
+      endnotesDetected: content.statistics.endnoteCount ?? 0,
+      notesPlacedExactly: content.statistics.notesPlacedExactly ?? 0,
+      notesUsingFallback: content.statistics.notesUsingFallback ?? 0,
+      brokenNoteReferences: content.statistics.brokenNoteReferences ?? 0,
       commentsDetected: content.statistics.commentsDetected,
+      commentsImported: content.statistics.commentsImported ?? 0,
+      approximateComments: content.statistics.approximateComments ?? 0,
       trackedChangesDetected: content.statistics.trackedChangesDetected,
+      trackedChangesMode: options.trackedChangesMode,
+      trackedChangeSummary: content.trackedChanges,
+      internalLinksImported: rendered.links.filter((link) => link.kind === "internal").length,
+      internalLinkFallbacks: rendered.links.filter((link) => link.kind === "internal" && link.usedFallbackDestination).length,
+      sectionNumberingDetected: content.sectionNumbering.length,
+      revision,
       fontSubstitutions,
       layoutSimplifications,
       sourceMappings: rendered.sourceMappings.length,
@@ -139,4 +171,9 @@ export async function importDocxDocument(file: File, options: DocxImportOptions,
 
 function normalizeHeadings(headings: DocxHeading[]) {
   return headings.filter((heading) => heading.title.trim()).map((heading) => ({ ...heading, level: Math.min(Math.max(heading.level, 1), 3) }));
+}
+
+async function hashBytes(bytes: Uint8Array) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

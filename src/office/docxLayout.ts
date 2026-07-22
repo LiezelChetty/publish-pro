@@ -1,5 +1,5 @@
 import { PDFArray, PDFHexString, PDFName, PDFNumber, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
-import type { DocxBlock, DocxExtractedImage, DocxHeading, DocxImageBlock, DocxImportOptions, DocxIntermediateDocument, DocxParagraphBlock, DocxRenderedLink, DocxSourceMapping, DocxTableBlock, DocxTextRun } from "./types";
+import type { DocxBlock, DocxExtractedImage, DocxHeading, DocxImageBlock, DocxImportOptions, DocxIntermediateDocument, DocxNote, DocxParagraphBlock, DocxRenderedLink, DocxSourceMapping, DocxTableBlock, DocxTextRun } from "./types";
 
 type LayoutContext = {
   pdf: PDFDocument;
@@ -16,6 +16,11 @@ type LayoutContext = {
   sourceMappings: DocxSourceMapping[];
   warnings: DocxIntermediateDocument["warnings"];
   fidelityMode: DocxImportOptions["fidelityMode"];
+  notes: Map<string, DocxNote>;
+  noteYByPage: Map<number, number>;
+  noteSeparatorPages: Set<number>;
+  notesPlaced: Set<string>;
+  notesFallback: Set<string>;
 };
 
 export async function renderDocxToPdf(document: DocxIntermediateDocument, fallbackFont: DocxImportOptions["fallbackFont"] = "Helvetica", fidelityMode: DocxImportOptions["fidelityMode"] = "balanced") {
@@ -41,6 +46,11 @@ export async function renderDocxToPdf(document: DocxIntermediateDocument, fallba
     sourceMappings: [],
     warnings: document.warnings,
     fidelityMode,
+    notes: new Map(document.notes.map((note) => [`${note.kind}:${note.id}`, note])),
+    noteYByPage: new Map(),
+    noteSeparatorPages: new Set(),
+    notesPlaced: new Set(),
+    notesFallback: new Set(),
   };
 
   for (const block of document.blocks) {
@@ -53,7 +63,11 @@ export async function renderDocxToPdf(document: DocxIntermediateDocument, fallba
     if (block.type === "table") drawTable(ctx, document, block);
   }
 
-  if (ctx.links.length > 0) addExternalLinkAnnotations(pdf, ctx.links);
+  resolveInternalLinkDestinations(document, ctx);
+  if (ctx.links.length > 0) addLinkAnnotations(pdf, ctx.links);
+  document.statistics.notesPlacedExactly = ctx.notesPlaced.size;
+  document.statistics.notesUsingFallback = ctx.notesFallback.size;
+  document.statistics.internalLinksMapped = ctx.links.filter((link) => link.kind === "internal" && !link.usedFallbackDestination).length;
   return { bytes: await pdf.save(), pageCount: pdf.getPageCount(), headings: ctx.headings, links: ctx.links, sourceMappings: ctx.sourceMappings };
 }
 
@@ -90,7 +104,8 @@ function addPage(ctx: LayoutContext, document: DocxIntermediateDocument) {
 
 function ensureSpace(ctx: LayoutContext, document: DocxIntermediateDocument, height: number, keepWithNext = false) {
   const minimumRemaining = keepWithNext ? Math.max(height, 72) : height;
-  if (ctx.y - minimumRemaining < document.pageSize.marginBottom) addPage(ctx, document);
+  const reservedNotesArea = document.notes.length > 0 ? 44 : 0;
+  if (ctx.y - minimumRemaining < document.pageSize.marginBottom + reservedNotesArea) addPage(ctx, document);
 }
 
 function drawParagraph(ctx: LayoutContext, document: DocxIntermediateDocument, paragraph: DocxParagraphBlock) {
@@ -130,6 +145,7 @@ function drawParagraph(ctx: LayoutContext, document: DocxIntermediateDocument, p
   }
   ctx.y -= spacingAfter;
   recordMapping(ctx, paragraph, document.pageSize.marginLeft + indent, ctx.y, maxWidth, blockTop - ctx.y);
+  drawParagraphNotes(ctx, document, paragraph);
 }
 
 async function drawImage(ctx: LayoutContext, document: DocxIntermediateDocument, block: DocxImageBlock) {
@@ -197,19 +213,27 @@ function getCellWidth(columnWidths: number[], row: Array<{ gridSpan?: number }>,
 }
 
 function addLineLink(ctx: LayoutContext, paragraph: DocxParagraphBlock, line: string, x: number, y: number, font: PDFFont, fontSize: number, lineHeight: number) {
-  const linkRun = paragraph.runs.find((run) => run.hyperlink && isExternalLink(run.hyperlink));
+  const linkRun = paragraph.runs.find((run) => run.hyperlink);
   if (!linkRun?.hyperlink) return;
   const width = font.widthOfTextAtSize(line, fontSize);
-  ctx.links.push({ blockId: paragraph.id, text: line.trim(), url: normalizeExternalLink(linkRun.hyperlink), pageNumber: ctx.pageNumber, x, y: y - 2, width, height: lineHeight });
+  if (isExternalLink(linkRun.hyperlink)) {
+    ctx.links.push({ blockId: paragraph.id, kind: "external", text: line.trim(), url: normalizeExternalLink(linkRun.hyperlink), pageNumber: ctx.pageNumber, x, y: y - 2, width, height: lineHeight });
+    return;
+  }
+  const anchor = linkRun.hyperlink.replace(/^#/, "");
+  ctx.links.push({ blockId: paragraph.id, kind: "internal", anchor, text: line.trim(), url: `#${anchor}`, pageNumber: ctx.pageNumber, x, y: y - 2, width, height: lineHeight });
 }
 
-function addExternalLinkAnnotations(pdf: PDFDocument, links: DocxRenderedLink[]) {
+function addLinkAnnotations(pdf: PDFDocument, links: DocxRenderedLink[]) {
   const pages = pdf.getPages();
   for (const link of links) {
     const page = pages[link.pageNumber - 1];
     if (!page) continue;
     const context = pdf.context;
-    const action = context.obj({ Type: "Action", S: "URI", URI: PDFHexString.fromText(link.url) });
+    const destinationPage = link.kind === "internal" ? pages[(link.destinationPageNumber ?? 1) - 1] : undefined;
+    const action = link.kind === "internal" && destinationPage
+      ? context.obj({ Type: "Action", S: "GoTo", D: context.obj([destinationPage.ref, PDFName.of("XYZ"), PDFNumber.of(0), PDFNumber.of(destinationPage.getHeight()), PDFNumber.of(0)]) })
+      : context.obj({ Type: "Action", S: "URI", URI: PDFHexString.fromText(link.url) });
     const annotation = context.register(
       context.obj({
         Type: "Annot",
@@ -223,6 +247,58 @@ function addExternalLinkAnnotations(pdf: PDFDocument, links: DocxRenderedLink[])
     const annots = existing ?? context.obj([]);
     annots.push(annotation);
     page.node.set(PDFName.of("Annots"), annots);
+  }
+}
+
+function resolveInternalLinkDestinations(document: DocxIntermediateDocument, ctx: LayoutContext) {
+  const bookmarkBlockByName = new Map(document.wordBookmarks.map((bookmark) => [bookmark.name, bookmark.blockId]));
+  const mappingByBlockId = new Map(ctx.sourceMappings.map((mapping) => [mapping.blockId, mapping]));
+  for (const link of ctx.links) {
+    if (link.kind !== "internal" || !link.anchor) continue;
+    const anchor = link.anchor;
+    const destinationBlockId = bookmarkBlockByName.get(anchor) ?? ctx.headings.find((heading) => normalizeAnchor(heading.title) === normalizeAnchor(anchor))?.blockId;
+    const mapping = destinationBlockId ? mappingByBlockId.get(destinationBlockId) : undefined;
+    link.destinationBlockId = destinationBlockId;
+    link.destinationPageNumber = mapping?.pageNumber ?? 1;
+    link.usedFallbackDestination = !mapping;
+    if (!mapping) {
+      ctx.warnings.push({ code: "internal-link-fallback", category: "hyperlinks", pageNumber: link.pageNumber, sourceBlockId: link.blockId, message: `Internal Word link "${link.text || link.anchor}" was exported to the top of page ${link.destinationPageNumber} because an exact bookmark position could not be resolved.` });
+    }
+  }
+}
+
+function drawParagraphNotes(ctx: LayoutContext, document: DocxIntermediateDocument, paragraph: DocxParagraphBlock) {
+  if (!paragraph.noteReferences?.length) return;
+  for (const reference of paragraph.noteReferences) {
+    const key = `${reference.kind}:${reference.id}`;
+    const note = ctx.notes.get(key);
+    if (!note || ctx.notesPlaced.has(key) || ctx.notesFallback.has(key)) continue;
+    const width = document.pageSize.width - document.pageSize.marginLeft - document.pageSize.marginRight;
+    const fontSize = 8;
+    const lines = wrapText(`${note.marker} ${note.text}`, width, ctx.fontRegular, fontSize).slice(0, 4);
+    const needed = lines.length * 10 + 4;
+    const currentY = ctx.noteYByPage.get(ctx.pageNumber) ?? document.pageSize.marginBottom + 30;
+    if (currentY - needed > 18) {
+      if (!ctx.noteSeparatorPages.has(ctx.pageNumber)) {
+        ctx.page.drawLine({ start: { x: document.pageSize.marginLeft, y: document.pageSize.marginBottom + 42 }, end: { x: document.pageSize.marginLeft + 110, y: document.pageSize.marginBottom + 42 }, thickness: 0.4, color: rgb(0.55, 0.6, 0.68) });
+        ctx.noteSeparatorPages.add(ctx.pageNumber);
+      }
+      let y = currentY;
+      for (const line of lines) {
+        ctx.page.drawText(line, { x: document.pageSize.marginLeft, y, size: fontSize, font: ctx.fontRegular, color: rgb(0.18, 0.22, 0.3) });
+        y -= 10;
+      }
+      ctx.noteYByPage.set(ctx.pageNumber, y);
+      ctx.notesPlaced.add(key);
+    } else {
+      ctx.warnings.push({ code: "note-overflow-fallback", category: "footnotes", pageNumber: ctx.pageNumber, sourceBlockId: paragraph.id, message: `${reference.kind === "footnote" ? "Footnote" : "Endnote"} ${reference.id} could not fit in the bottom note area and was appended inline after its reference paragraph.` });
+      ensureSpace(ctx, document, needed + 8);
+      for (const line of lines) {
+        ctx.page.drawText(line, { x: document.pageSize.marginLeft, y: ctx.y - 10, size: fontSize, font: ctx.fontItalic, color: rgb(0.18, 0.22, 0.3) });
+        ctx.y -= 10;
+      }
+      ctx.notesFallback.add(key);
+    }
   }
 }
 
@@ -319,6 +395,10 @@ function isExternalLink(url: string) {
 
 function normalizeExternalLink(url: string) {
   return /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+}
+
+function normalizeAnchor(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function colorToRgb(hex: string) {

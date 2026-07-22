@@ -11,13 +11,17 @@ import {
 } from "./docxPackage";
 import { getHyperlinkTarget, type DocxRelationships } from "./docxImages";
 import { getTableCells, getTableRows } from "./docxTables";
-import type { DocxBlock, DocxImportOptions, DocxImportWarning, DocxPageSize, DocxParagraphBlock, DocxTextRun } from "./types";
+import type { DocxBlock, DocxImportOptions, DocxImportWarning, DocxInternalLink, DocxNote, DocxNoteReference, DocxPageSize, DocxParagraphBlock, DocxSectionNumbering, DocxTextRun, DocxTrackedChange, DocxWordBookmark, DocxWordComment } from "./types";
 import { mergeParagraphFormat, mergeRunFormat, parseParagraphFormat, parseRunFormat, type DocxNumberingMap, type DocxStyleMap } from "./docxStyles";
 
 type ParseState = {
   sourceOrder: number;
   listCounters: Map<string, number>;
   hyperlinks: Array<{ text: string; url: string }>;
+  internalLinks: DocxInternalLink[];
+  wordBookmarks: DocxWordBookmark[];
+  wordComments: DocxWordComment[];
+  trackedChanges: DocxTrackedChange[];
   trackedChangesDetected: number;
 };
 
@@ -37,6 +41,10 @@ export function parseDocxContent(
     sourceOrder: 0,
     listCounters: new Map(),
     hyperlinks: [],
+    internalLinks: [],
+    wordBookmarks: [],
+    wordComments: parseWordComments(pkg),
+    trackedChanges: [],
     trackedChangesDetected: 0,
   };
   const blocks: DocxBlock[] = [];
@@ -67,27 +75,46 @@ export function parseDocxContent(
   }
 
   sectionCount = Math.max(sectionCount, getElementsByLocalName(body, "sectPr").length || 1);
-  const footnoteCount = countFootnotes(pkg);
-  const endnoteCount = countEndnotes(pkg);
-  const commentsDetected = countComments(pkg);
-  if (footnoteCount > 0 || endnoteCount > 0) warnings.push({ code: "notes-fallback", message: `${footnoteCount} footnotes and ${endnoteCount} endnotes were detected. References are preserved inline; exact Word note placement is recorded as a layout simplification.` });
-  if (commentsDetected > 0) warnings.push({ code: "word-comments-detected", message: `${commentsDetected} Word comments were detected. Comment text is preserved in the source DOCX; precise comment-to-page mapping is planned for a later pass.` });
-  if (state.trackedChangesDetected > 0) warnings.push({ code: "tracked-changes-mode", message: `${state.trackedChangesDetected} tracked-change elements were detected. Import used the ${options.trackedChangesMode === "accepted" ? "accepted result" : "reject deletions"} mode.` });
+  const notes = [...parseNotes(pkg, "footnote"), ...parseNotes(pkg, "endnote")];
+  const noteIds = new Set(notes.map((note) => `${note.kind}:${note.id}`));
+  const noteReferences = blocks.flatMap((block) => (block.type === "paragraph" ? block.noteReferences ?? [] : []));
+  const brokenNoteReferences = noteReferences.filter((reference) => !noteIds.has(`${reference.kind}:${reference.id}`)).length;
+  if (brokenNoteReferences > 0) warnings.push({ code: "broken-note-reference", category: "footnotes", message: `${brokenNoteReferences} Word note references could not be resolved to footnote or endnote text.` });
+  if (notes.length > 0) warnings.push({ code: "notes-imported", category: "footnotes", message: `${notes.filter((note) => note.kind === "footnote").length} footnotes and ${notes.filter((note) => note.kind === "endnote").length} endnotes were imported with bottom-of-page placement where space allows.` });
+  if (state.wordComments.length > 0) warnings.push({ code: "word-comments-imported", category: "comments", message: `${state.wordComments.length} Word comments were imported into Publish Pro review comments with approximate source mapping where exact ranges are unavailable.` });
+  if (state.trackedChangesDetected > 0) warnings.push({ code: "tracked-changes-mode", category: "trackedChanges", message: `${state.trackedChangesDetected} tracked-change elements were detected. Import used ${getTrackedChangesModeLabel(options.trackedChangesMode)} mode.` });
+  if (state.internalLinks.length > 0) warnings.push({ code: "internal-links-detected", category: "hyperlinks", message: `${state.internalLinks.length} internal Word hyperlinks were detected and will be mapped to PDF page destinations where possible.` });
+
+  const sectionNumbering = parseSectionNumbering(body);
+  if (sectionNumbering.length > 0) warnings.push({ code: "section-numbering-imported", category: "sections", message: `${sectionNumbering.length} Word section page-numbering starts were mapped into Publish Pro numbering sections where page mapping is reliable.` });
 
   return {
     blocks,
     pageSize: parsePageSize(body) ?? getFallbackPageSize(options.fallbackPageSize),
     hyperlinks: state.hyperlinks,
+    notes,
+    wordBookmarks: state.wordBookmarks,
+    internalLinks: state.internalLinks,
+    wordComments: state.wordComments,
+    trackedChanges: state.trackedChanges,
+    sectionNumbering,
     statistics: {
       paragraphCount,
       tableCount,
       listCount,
       imageCount: 0,
-      footnoteCount,
-      endnoteCount,
-      commentsDetected,
+      footnoteCount: notes.filter((note) => note.kind === "footnote").length,
+      endnoteCount: notes.filter((note) => note.kind === "endnote").length,
+      commentsDetected: state.wordComments.length,
       trackedChangesDetected: state.trackedChangesDetected,
       sectionCount,
+      notesPlacedExactly: 0,
+      notesUsingFallback: notes.length,
+      brokenNoteReferences,
+      internalLinksDetected: state.internalLinks.length,
+      internalLinksMapped: 0,
+      commentsImported: state.wordComments.length,
+      approximateComments: state.wordComments.filter((comment) => comment.approximate).length,
     },
   };
 }
@@ -153,6 +180,27 @@ function parseParagraph(
     widowControl: paragraphFormat.widowControl,
     list: numberingInfo,
   };
+  const sourceBookmarkNames = getElementsByLocalName(paragraph, "bookmarkStart").map((bookmark) => getAttr(bookmark, "name")).filter((name): name is string => typeof name === "string" && !name.startsWith("_"));
+  const sourceCommentIds = [
+    ...getElementsByLocalName(paragraph, "commentRangeStart").map((comment) => getAttr(comment, "id")),
+    ...getElementsByLocalName(paragraph, "commentReference").map((comment) => getAttr(comment, "id")),
+  ].filter((id): id is string => Boolean(id));
+  if (sourceBookmarkNames.length > 0) {
+    paragraphBlock.wordBookmarkNames = Array.from(new Set(sourceBookmarkNames));
+    paragraphBlock.wordBookmarkNames.forEach((name) => state.wordBookmarks.push({ name, blockId: paragraphBlock.id, sourceOrder }));
+  }
+  if (sourceCommentIds.length > 0) {
+    paragraphBlock.wordCommentIds = Array.from(new Set(sourceCommentIds));
+    const sourceText = getText(paragraph).trim();
+    for (const commentId of paragraphBlock.wordCommentIds) {
+      const existing = state.wordComments.find((comment) => comment.sourceId === commentId);
+      if (existing) {
+        existing.blockId = paragraphBlock.id;
+        existing.sourceText = sourceText || existing.sourceText;
+        existing.approximate = false;
+      }
+    }
+  }
   const images: DocxBlock[] = [];
   let pageBreaksAfter = 0;
 
@@ -162,23 +210,37 @@ function parseParagraph(
     if (element.localName === "r") {
       const parsed = parseRun(element, styles, relationships, state, undefined, warnings);
       paragraphBlock.runs.push(...parsed.runs);
+      appendNoteReferences(paragraphBlock, parsed.noteReferences);
       images.push(...parsed.images);
       pageBreaksAfter += parsed.pageBreaks;
     }
     if (element.localName === "hyperlink") {
       const relationshipId = getAttr(element, "id");
-      const target = getHyperlinkTarget(relationships, relationshipId) ?? getAttr(element, "anchor");
+      const anchor = getAttr(element, "anchor");
+      const target = getHyperlinkTarget(relationships, relationshipId) ?? anchor;
       const runs = getChildrenByLocalName(element, "r").flatMap((run) => parseRun(run, styles, relationships, state, target, warnings).runs);
       paragraphBlock.runs.push(...runs);
       const text = runs.map((run) => run.text).join("").trim();
       if (target && text) state.hyperlinks.push({ text, url: target });
+      if (anchor && text) state.internalLinks.push({ blockId: paragraphBlock.id, anchor, text, sourceOrder });
     }
-    if (element.localName === "ins" || element.localName === "del") {
+    if (element.localName === "ins" || element.localName === "del" || element.localName === "moveFrom" || element.localName === "moveTo") {
       state.trackedChangesDetected += 1;
-      if (element.localName === "del" && options.trackedChangesMode === "accepted") continue;
+      const changeType = getTrackedChangeType(element.localName);
+      const changeText = getText(element).trim();
+      state.trackedChanges.push({
+        id: getAttr(element, "id") ?? `tracked-${state.trackedChangesDetected}`,
+        type: changeType,
+        author: getAttr(element, "author"),
+        date: getAttr(element, "date"),
+        text: changeText,
+        blockId: paragraphBlock.id,
+      });
+      if (!shouldRenderTrackedChange(element.localName, options.trackedChangesMode)) continue;
       for (const run of getChildrenByLocalName(element, "r")) {
         const parsed = parseRun(run, styles, relationships, state, undefined, warnings);
         paragraphBlock.runs.push(...parsed.runs);
+        appendNoteReferences(paragraphBlock, parsed.noteReferences);
         pageBreaksAfter += parsed.pageBreaks;
       }
     }
@@ -186,13 +248,14 @@ function parseParagraph(
   return { paragraph: paragraphBlock, images, pageBreakBefore: Boolean(paragraphFormat.pageBreakBefore), pageBreaksAfter };
 }
 
-function parseRun(run: Element, styles: DocxStyleMap, relationships: DocxRelationships, state: ParseState, hyperlink: string | undefined, warnings: DocxImportWarning[]): { runs: DocxTextRun[]; images: DocxBlock[]; pageBreaks: number } {
+function parseRun(run: Element, styles: DocxStyleMap, relationships: DocxRelationships, state: ParseState, hyperlink: string | undefined, warnings: DocxImportWarning[]): { runs: DocxTextRun[]; images: DocxBlock[]; pageBreaks: number; noteReferences: DocxNoteReference[] } {
   const rPr = getFirstChildByLocalName(run, "rPr");
   const characterStyleId = getAttr(getFirstChildByLocalName(rPr ?? run, "rStyle"), "val");
   const characterStyle = styles.resolveCharacterStyle(characterStyleId);
   const base = { ...mergeRunFormat(styles.documentDefaults.run, characterStyle?.run, parseRunFormat(rPr)), hyperlink };
   const runs: DocxTextRun[] = [];
   const images: DocxBlock[] = [];
+  const noteReferences: DocxNoteReference[] = [];
   let pageBreaks = 0;
   for (const child of Array.from(run.childNodes)) {
     if (child.nodeType !== Node.ELEMENT_NODE) continue;
@@ -224,13 +287,19 @@ function parseRun(run: Element, styles: DocxStyleMap, relationships: DocxRelatio
         warnings.push({ code: "unsupported-image-reference", message: "An image or drawing was found without a resolvable relationship ID and was skipped." });
       }
     }
-    if (element.localName === "footnoteReference") runs.push(createRun(state, base, `[${getAttr(element, "id") ?? ""}]`));
+    if (element.localName === "footnoteReference" || element.localName === "endnoteReference") {
+      const kind = element.localName === "endnoteReference" ? "endnote" : "footnote";
+      const id = getAttr(element, "id") ?? "";
+      const marker = id ? `[${id}]` : "[]";
+      noteReferences.push({ id, kind, marker });
+      runs.push(createRun(state, { ...base, verticalAlign: "superscript" }, marker));
+    }
     if (element.localName === "fldChar" || element.localName === "instrText") {
       const field = (element.textContent ?? "").trim();
       if (field) warnings.push({ code: "word-field", message: `Word field detected: ${field}. Visible field result text is imported where available.` });
     }
   }
-  return { runs, images, pageBreaks };
+  return { runs, images, pageBreaks, noteReferences };
 }
 
 function parseTable(table: Element, styles: DocxStyleMap, numbering: DocxNumberingMap, relationships: DocxRelationships, state: ParseState, warnings: DocxImportWarning[], options: Pick<DocxImportOptions, "trackedChangesMode" | "fidelityMode">) {
@@ -320,21 +389,6 @@ export function getFallbackPageSize(size: "a4" | "letter" | "legal"): DocxPageSi
   return { width: 612, height: 792, marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72 };
 }
 
-function countFootnotes(pkg: DocxPackage) {
-  const xml = getXml(pkg, "word/footnotes.xml", "word/footnotes.xml");
-  return xml ? getElementsByLocalName(xml, "footnote").filter((footnote) => Number(getAttr(footnote, "id")) > 0).length : 0;
-}
-
-function countEndnotes(pkg: DocxPackage) {
-  const xml = getXml(pkg, "word/endnotes.xml", "word/endnotes.xml");
-  return xml ? getElementsByLocalName(xml, "endnote").filter((endnote) => Number(getAttr(endnote, "id")) > 0).length : 0;
-}
-
-function countComments(pkg: DocxPackage) {
-  const xml = getXml(pkg, "word/comments.xml", "word/comments.xml");
-  return xml ? getElementsByLocalName(xml, "comment").length : 0;
-}
-
 function normalizeColor(value?: string) {
   if (!value || value === "auto" || value.length !== 6) return undefined;
   return `#${value}`;
@@ -363,4 +417,105 @@ function uniqueJoin(values: string[]) {
 function nextOrder(state: ParseState) {
   state.sourceOrder += 1;
   return state.sourceOrder;
+}
+
+function parseNotes(pkg: DocxPackage, kind: "footnote" | "endnote"): DocxNote[] {
+  const xml = getXml(pkg, kind === "footnote" ? "word/footnotes.xml" : "word/endnotes.xml", kind === "footnote" ? "word/footnotes.xml" : "word/endnotes.xml");
+  if (!xml) return [];
+  const relationships = parsePartRelationships(pkg, kind === "footnote" ? "word/_rels/footnotes.xml.rels" : "word/_rels/endnotes.xml.rels");
+  return getElementsByLocalName(xml, kind)
+    .filter((note) => Number(getAttr(note, "id")) > 0)
+    .map((note) => {
+      const id = getAttr(note, "id") ?? "";
+      return {
+        id,
+        kind,
+        marker: `[${id}]`,
+        text: getText(note).trim(),
+        hyperlinks: getElementsByLocalName(note, "hyperlink").map((link) => {
+          const relationshipId = getAttr(link, "id");
+          return { text: getText(link).trim(), url: relationships.get(relationshipId ?? "") ?? getAttr(link, "anchor") ?? "" };
+        }).filter((link) => link.text && link.url),
+      };
+    });
+}
+
+function parsePartRelationships(pkg: DocxPackage, path: string) {
+  const xml = getXml(pkg, path, path);
+  if (!xml) return new Map<string, string>();
+  const entries: Array<[string, string]> = getElementsByLocalName(xml, "Relationship").flatMap((relationship) => {
+    const id = getAttr(relationship, "Id");
+    const target = getAttr(relationship, "Target");
+    return id && target ? [[id, target]] : [];
+  });
+  return new Map(entries);
+}
+
+function parseWordComments(pkg: DocxPackage): DocxWordComment[] {
+  const xml = getXml(pkg, "word/comments.xml", "word/comments.xml");
+  if (!xml) return [];
+  return getElementsByLocalName(xml, "comment").map((comment) => ({
+    sourceId: getAttr(comment, "id") ?? crypto.randomUUID(),
+    author: getAttr(comment, "author") || "Word reviewer",
+    initials: getAttr(comment, "initials"),
+    date: getAttr(comment, "date"),
+    text: getText(comment).trim(),
+    approximate: true,
+  })).filter((comment) => comment.text);
+}
+
+function parseSectionNumbering(body: Element): DocxSectionNumbering[] {
+  return getElementsByLocalName(body, "sectPr").flatMap((section) => {
+    const pgNumType = getFirstChildByLocalName(section, "pgNumType");
+    if (!pgNumType) return [];
+    const startValue = Number(getAttr(pgNumType, "start") ?? 1) || 1;
+    return [{
+      blockId: `docx-section-${getElementsByLocalName(body, "sectPr").indexOf(section) + 1}`,
+      sourceOrder: getElementsByLocalName(body, "sectPr").indexOf(section) + 1,
+      startValue,
+      format: parsePageNumberFormat(getAttr(pgNumType, "fmt")),
+      prefix: getAttr(pgNumType, "chapSep") ? `${getAttr(pgNumType, "chapSep")}` : "",
+      unnumbered: getAttr(pgNumType, "start") === "0",
+    }];
+  });
+}
+
+function parsePageNumberFormat(value?: string): DocxSectionNumbering["format"] {
+  if (value === "lowerRoman") return "romanLower";
+  if (value === "upperRoman") return "romanUpper";
+  if (value === "lowerLetter") return "alphaLower";
+  if (value === "upperLetter") return "alphaUpper";
+  return "decimal";
+}
+
+function appendNoteReferences(paragraph: DocxParagraphBlock, references: DocxNoteReference[]) {
+  if (references.length === 0) return;
+  paragraph.noteReferences = [...(paragraph.noteReferences ?? []), ...references];
+}
+
+function shouldRenderTrackedChange(localName: string, mode: DocxImportOptions["trackedChangesMode"]) {
+  const normalizedMode = normalizeTrackedChangesMode(mode);
+  if (localName === "del" || localName === "moveFrom") return normalizedMode === "rejectAll";
+  if (localName === "ins" || localName === "moveTo") return normalizedMode !== "rejectAll";
+  return true;
+}
+
+function normalizeTrackedChangesMode(mode: DocxImportOptions["trackedChangesMode"] | "accepted" | "rejectDeletions") {
+  if (mode === "accepted") return "acceptAll";
+  if (mode === "rejectDeletions") return "rejectAll";
+  return mode;
+}
+
+function getTrackedChangesModeLabel(mode: DocxImportOptions["trackedChangesMode"]) {
+  const normalizedMode = normalizeTrackedChangesMode(mode);
+  if (normalizedMode === "rejectAll") return "Reject all";
+  if (normalizedMode === "summary") return "Preserve review summary";
+  return "Accept all";
+}
+
+function getTrackedChangeType(localName: string): DocxTrackedChange["type"] {
+  if (localName === "del") return "deletion";
+  if (localName === "moveFrom") return "moveFrom";
+  if (localName === "moveTo") return "moveTo";
+  return "insertion";
 }
