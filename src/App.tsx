@@ -129,16 +129,17 @@ import type { DocxImportMetadata, DocxImportOptions, DocxImportReport, DocxSecti
 import { importPptxPresentation } from "./office/pptxImport";
 import { defaultPptxImportOptions, validatePptxImportFile } from "./office/pptxValidation";
 import type { PptxImportMetadata, PptxImportOptions, PptxImportReport, PptxSourceMapping } from "./office/pptxTypes";
+import { runtime, runtimeFileToBrowserFile } from "./runtime";
 import {
-  addRecentProject,
-  clearRecentProjects,
-  clearAutosave,
+  addRecentProject as addBrowserRecentProject,
+  clearRecentProjects as clearBrowserRecentProjects,
+  clearAutosave as clearBrowserAutosave,
   inputToMetadataTags,
-  loadAutosave,
-  loadRecentProjects,
+  loadAutosave as loadBrowserAutosave,
+  loadRecentProjects as loadBrowserRecentProjects,
   metadataTagsToInput,
-  removeRecentProject,
-  saveAutosave,
+  removeRecentProject as removeBrowserRecentProject,
+  saveAutosave as saveBrowserAutosave,
   type ProjectAutosave,
   type RecentProject,
 } from "./projects/storage";
@@ -380,8 +381,10 @@ export function App() {
   const [projectMetadata, setProjectMetadata] = useState<ProjectMetadata>(() => createProjectMetadata());
   const [isProjectDirty, setIsProjectDirty] = useState(false);
   const [savedProjectFingerprint, setSavedProjectFingerprint] = useState("");
-  const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => loadRecentProjects());
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => runtime.isDesktop ? [] : loadBrowserRecentProjects());
   const [autosaveCandidate, setAutosaveCandidate] = useState<ProjectAutosave | null>(null);
+  const [desktopProjectPath, setDesktopProjectPath] = useState<string | null>(null);
+  const [lastExportPath, setLastExportPath] = useState<string | null>(null);
   const [publishingSettings, setPublishingSettings] = useState<PublishingSettings>(() => createDefaultPublishingSettings());
   const [publishingHistory, setPublishingHistory] = useState<{ past: PublishingSettings[]; future: PublishingSettings[] }>({ past: [], future: [] });
   const [publishingPresets, setPublishingPresets] = useState<PublishingPreset[]>(() => loadPublishingPresets());
@@ -428,6 +431,7 @@ export function App() {
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [isShortcutDialogOpen, setIsShortcutDialogOpen] = useState(false);
+  const [isCloseGuardOpen, setIsCloseGuardOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [selectedPageIds, setSelectedPageIds] = useState<string[]>([demoPages[0].id]);
   const [lastSelectedPageId, setLastSelectedPageId] = useState<string | null>(demoPages[0].id);
@@ -710,6 +714,36 @@ export function App() {
     return serializeProject(getProjectSnapshotInput());
   }
 
+  async function loadStoredAutosave() {
+    return runtime.isDesktop ? runtime.loadAutosave() : loadBrowserAutosave();
+  }
+
+  async function saveStoredAutosave(bytes: Uint8Array, manifest: ReturnType<typeof buildProjectManifest>) {
+    return runtime.isDesktop ? runtime.saveAutosave(bytes, manifest, desktopProjectPath) : saveBrowserAutosave(bytes, manifest);
+  }
+
+  async function clearStoredAutosave() {
+    if (runtime.isDesktop) {
+      await runtime.clearAutosave();
+      return;
+    }
+    await clearBrowserAutosave();
+  }
+
+  async function addStoredRecentProject(manifest: ReturnType<typeof buildProjectManifest>, options: { filename?: string; path?: string; origin?: RecentProject["origin"]; autosaveAvailable?: boolean } = {}) {
+    if (runtime.isDesktop) {
+      await runtime.addRecentProject(manifest, options);
+      setRecentProjects((await runtime.loadRecentProjects()) ?? []);
+      return;
+    }
+    await addBrowserRecentProject(manifest, { filename: options.filename, origin: options.origin, autosaveAvailable: options.autosaveAvailable });
+    setRecentProjects(loadBrowserRecentProjects());
+  }
+
+  async function refreshStoredRecentProjects() {
+    setRecentProjects(runtime.isDesktop ? (await runtime.loadRecentProjects()) ?? [] : loadBrowserRecentProjects());
+  }
+
   function startNewProject() {
     setNewProjectDraft(createProjectMetadata("Untitled project"));
     setIsProjectDialogOpen(true);
@@ -719,7 +753,7 @@ export function App() {
     if (hasOpenProject && hasUnsavedChanges && !window.confirm("Close the current project and discard unsaved changes?")) return;
     if (mode === "pdf") {
       setIsProjectDialogOpen(false);
-      fileInput.current?.click();
+      void choosePdfFile();
       return;
     }
     const name = newProjectDraft.name.trim() || "Untitled project";
@@ -730,6 +764,7 @@ export function App() {
     setSavedProjectFingerprint("");
     setLastSavedAt(null);
     setLastAutosavedAt(null);
+    setDesktopProjectPath(null);
     setPdfName(name);
     setPdfBytes(null);
     setPdfDoc(null);
@@ -753,12 +788,12 @@ export function App() {
     setErrorMessage("");
   }
 
-  async function openProjectFile(file: File) {
+  async function openProjectFile(file: File, sourcePath?: string) {
     try {
       setErrorMessage("");
       setWorkState({ message: `Opening ${file.name}`, progress: 15 });
       const bytes = new Uint8Array(await file.arrayBuffer());
-      await loadProjectBytes(bytes, file.name);
+      await loadProjectBytes(bytes, file.name, sourcePath);
       setWorkState(null);
     } catch (error) {
       setWorkState(null);
@@ -766,7 +801,7 @@ export function App() {
     }
   }
 
-  async function loadProjectBytes(bytes: Uint8Array, fileName = "Project.pproj") {
+  async function loadProjectBytes(bytes: Uint8Array, fileName = "Project.pproj", sourcePath?: string) {
     const bundle = deserializeProject(bytes);
     const nextSources: Record<string, SourceDocument> = {};
     for (const source of bundle.manifest.sources) {
@@ -830,9 +865,9 @@ export function App() {
     setLastSelectedPageId(selectedIds[0] ?? nextPages[0]?.id ?? null);
     setIsProjectDirty(false);
     setLastSavedAt(bundle.manifest.metadata.modifiedAt);
+    setDesktopProjectPath(sourcePath ?? null);
     setProjectStatusMessage(`Opened ${fileName}.`);
-    await addRecentProject(bundle.manifest, { filename: fileName, origin: "browser-import" });
-    setRecentProjects(loadRecentProjects());
+    await addStoredRecentProject(bundle.manifest, { filename: fileName, path: sourcePath, origin: runtime.isDesktop ? "file-system-access" : "browser-import" });
   }
 
   function handleProjectUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -843,34 +878,96 @@ export function App() {
     void openProjectFile(file);
   }
 
-  async function saveProject() {
+  async function chooseProjectFile() {
+    if (!runtime.isDesktop) {
+      projectInput.current?.click();
+      return;
+    }
+    const files = await runtime.openFiles({ kind: "project", title: "Open Publish Pro Project" });
+    const file = files?.[0];
+    if (!file) return;
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Open this project and discard unsaved changes in the current one?")) return;
+    await openProjectFile(await runtimeFileToBrowserFile(file), file.path);
+  }
+
+  async function choosePdfFile() {
+    if (!runtime.isDesktop) {
+      fileInput.current?.click();
+      return;
+    }
+    const files = await runtime.openFiles({ kind: "pdf", title: "Open PDF" });
+    const file = files?.[0];
+    if (!file) return;
+    if (hasOpenProject && hasUnsavedChanges && !window.confirm("Open this PDF and discard unsaved changes in the current project?")) return;
+    await loadFile(await runtimeFileToBrowserFile(file));
+  }
+
+  async function chooseDocxFile() {
+    if (!runtime.isDesktop) {
+      docxInput.current?.click();
+      return;
+    }
+    const files = await runtime.openFiles({ kind: "docx", title: "Import Word Document" });
+    const file = files?.[0];
+    if (!file) return;
+    beginDocxImport(await runtimeFileToBrowserFile(file), hasOpenProject ? "append" : "replace");
+  }
+
+  async function choosePptxFile() {
+    if (!runtime.isDesktop) {
+      pptxInput.current?.click();
+      return;
+    }
+    const files = await runtime.openFiles({ kind: "pptx", title: "Import PowerPoint Presentation" });
+    const file = files?.[0];
+    if (!file) return;
+    beginPptxImport(await runtimeFileToBrowserFile(file), hasOpenProject ? "append" : "replace");
+  }
+
+  async function choosePdfImports() {
+    if (!runtime.isDesktop) {
+      importPdfInput.current?.click();
+      return;
+    }
+    const files = await runtime.openFiles({ kind: "pdf", multiple: true, title: "Import PDF Files" });
+    if (!files?.length) return;
+    await addFilesToMergeQueue(await Promise.all(files.map(runtimeFileToBrowserFile)));
+    setActivePageDialog("merge");
+  }
+
+  async function saveProject(targetPath = desktopProjectPath) {
     try {
       setErrorMessage("");
       const bytes = createProjectFileBytes();
       const manifest = buildProjectManifest(getProjectSnapshotInput());
       const filename = `${sanitizeFilename(projectMetadata.name || "publish-pro-project")}.pproj`;
-      const savedViaFileSystem = await saveProjectBytes(bytes, filename);
-      await addRecentProject(manifest, { filename, origin: savedViaFileSystem ? "file-system-access" : "download" });
-      setRecentProjects(loadRecentProjects());
-      await clearAutosave();
+      const desktopResult = runtime.isDesktop ? await runtime.saveFile({ kind: "project", bytes, suggestedName: filename, currentPath: targetPath }) : null;
+      if (desktopResult && !desktopResult.saved) return false;
+      const savedViaFileSystem = desktopResult?.native ?? await saveProjectBytes(bytes, filename);
+      if (desktopResult?.path) setDesktopProjectPath(desktopResult.path);
+      await addStoredRecentProject(manifest, { filename, path: desktopResult?.path ?? targetPath ?? undefined, origin: savedViaFileSystem ? "file-system-access" : "download" });
+      await clearStoredAutosave();
       setAutosaveCandidate(null);
       setLastSavedAt(new Date().toISOString());
-      setProjectStatusMessage(savedViaFileSystem ? "Project saved." : "Project downloaded as a .pproj file.");
+      setProjectStatusMessage(runtime.isDesktop && desktopResult?.path ? "Project saved to disk." : savedViaFileSystem ? "Project saved." : "Project downloaded as a .pproj file.");
       setIsProjectDirty(false);
       setSavedProjectFingerprint(currentProjectFingerprint);
+      return true;
     } catch (error) {
       setErrorMessage(getProjectErrorMessage(error, "save"));
+      return false;
     }
   }
 
   function saveProjectAs() {
-    void saveProject();
+    void saveProject(null);
   }
 
   function closeProject() {
     if (hasOpenProject && hasUnsavedChanges && !window.confirm("Close this project and discard unsaved changes?")) return;
     setHasOpenProject(false);
     setPdfName("Untitled document");
+    setDesktopProjectPath(null);
     setPdfBytes(null);
     setPdfDoc(null);
     setActiveSourceDocumentId(null);
@@ -1098,7 +1195,8 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    loadAutosave()
+    refreshStoredRecentProjects().catch(() => undefined);
+    loadStoredAutosave()
       .then((autosave) => {
         if (cancelled) return;
         setAutosaveCandidate(autosave);
@@ -1120,12 +1218,11 @@ export function App() {
           setProjectStatusMessage("Autosaving locally...");
           const bytes = createProjectFileBytes();
           const manifest = buildProjectManifest(getProjectSnapshotInput());
-          const autosave = await saveAutosave(bytes, manifest);
-          await addRecentProject(manifest, { origin: "autosave", autosaveAvailable: true });
+          const autosave = await saveStoredAutosave(bytes, manifest);
+          await addStoredRecentProject(manifest, { origin: "autosave", autosaveAvailable: true, path: desktopProjectPath ?? undefined });
           setAutosaveCandidate(autosave);
-          setLastAutosavedAt(autosave.savedAt);
-          setRecentProjects(loadRecentProjects());
-          setProjectStatusMessage(`Autosaved locally at ${formatDateTime(autosave.savedAt)}.`);
+          setLastAutosavedAt(autosave?.savedAt ?? null);
+          setProjectStatusMessage(autosave ? `Autosaved locally at ${formatDateTime(autosave.savedAt)}.` : "Autosave is handled by the active runtime.");
         } catch {
           setProjectStatusMessage("Autosave failed. Your current browser session is still active.");
         }
@@ -1133,7 +1230,7 @@ export function App() {
     }, 900);
 
     return () => window.clearTimeout(timeout);
-  }, [hasOpenProject, projectId, projectMetadata, pages, marks, sourceDocuments, currentPage, zoom, activeWorkspace, leftPanel, selectedPageIds, pdfName]);
+  }, [hasOpenProject, projectId, projectMetadata, pages, marks, sourceDocuments, currentPage, zoom, activeWorkspace, leftPanel, selectedPageIds, pdfName, desktopProjectPath]);
 
   useEffect(() => {
     if (!projectStatusMessage) return;
@@ -1144,6 +1241,102 @@ export function App() {
     if (!errorMessage) return;
     pushToast({ tone: "error", title: "Action failed", detail: errorMessage });
   }, [errorMessage]);
+
+  useEffect(() => {
+    if (!runtime.isDesktop) return;
+    const projectTitle = hasOpenProject ? projectMetadata.name || pdfName.replace(/\.pdf$/i, "") || "Untitled Project" : "";
+    const title = projectTitle ? `${projectTitle}${hasUnsavedChanges ? " • Unsaved" : ""} - Publish Pro` : "Publish Pro";
+    void runtime.setWindowTitle(title);
+  }, [hasOpenProject, hasUnsavedChanges, projectMetadata.name, pdfName]);
+
+  useEffect(() => {
+    if (!runtime.isDesktop) return undefined;
+    let unlistenMenu: (() => void) | undefined;
+    let unlistenLaunch: (() => void) | undefined;
+    void runtime.listenMenuActions((action) => {
+      void handleDesktopMenuAction(action);
+    }).then((unlisten) => {
+      unlistenMenu = unlisten;
+    });
+    void runtime.listenLaunchFiles((paths) => {
+      void handleDesktopLaunchFiles(paths);
+    }).then((unlisten) => {
+      unlistenLaunch = unlisten;
+    });
+    return () => {
+      unlistenMenu?.();
+      unlistenLaunch?.();
+    };
+  }, [hasOpenProject, hasUnsavedChanges, desktopProjectPath, pages, marks, activeWorkspace, selected]);
+
+  async function handleDesktopMenuAction(action: string) {
+    if (action === "window-close-requested" || action === "exit") {
+      if (hasOpenProject && hasUnsavedChanges) {
+        setIsCloseGuardOpen(true);
+      } else {
+        await runtime.forceClose();
+      }
+      return;
+    }
+    if (action === "new-project") startNewProject();
+    if (action === "open-project") await chooseProjectFile();
+    if (action === "save-project") await saveProject();
+    if (action === "save-project-as") saveProjectAs();
+    if (action === "import-pdf" || action === "open-pdf") await choosePdfFile();
+    if (action === "import-docx") await chooseDocxFile();
+    if (action === "import-pptx") await choosePptxFile();
+    if (action === "publish-pdf") await exportPdf();
+    if (action === "close-project") closeProject();
+    if (action === "undo") undo();
+    if (action === "redo") redo();
+    if (action === "delete") removeSelectedMark();
+    if (action === "select-all-pages") selectAllPages();
+    if (action === "workspace-import") selectWorkspace("import");
+    if (action === "workspace-assemble") selectWorkspace("assemble");
+    if (action === "workspace-review") selectWorkspace("review");
+    if (action === "workspace-publish") selectWorkspace("publish");
+    if (action === "zoom-in") setZoom((value) => Math.min(1.6, value + 0.1));
+    if (action === "zoom-out") setZoom((value) => Math.max(0.55, value - 0.1));
+    if (action === "fit-page") setZoom(1);
+    if (action === "fit-width") setZoom(1.25);
+    if (action === "toggle-left-panel") setIsLeftPanelCollapsed((value) => !value);
+    if (action === "toggle-inspector") setIsRightPanelCollapsed((value) => !value);
+    if (action === "shortcuts") setIsShortcutDialogOpen(true);
+    if (action === "about") pushToast({ tone: "info", title: "Publish Pro 0.1.0", detail: "By Designovation. Local-first desktop publishing workspace." });
+  }
+
+  async function saveAndCloseDesktop() {
+    if (await saveProject()) await runtime.forceClose();
+  }
+
+  async function discardAndCloseDesktop() {
+    setIsCloseGuardOpen(false);
+    await runtime.forceClose();
+  }
+
+  async function handleDesktopLaunchFiles(paths: string[]) {
+    const first = paths[0];
+    if (!first) return;
+    if (hasOpenProject && hasUnsavedChanges) {
+      pushToast({ tone: "warning", title: "Open file blocked", detail: "Save or close the current project before opening a launch file." });
+      return;
+    }
+    const runtimeFile = await runtime.readPath(first);
+    if (!runtimeFile) return;
+    const file = await runtimeFileToBrowserFile(runtimeFile);
+    const name = runtimeFile.name.toLowerCase();
+    if (name.endsWith(".pproj")) {
+      await openProjectFile(file, runtimeFile.path);
+    } else if (name.endsWith(".pdf")) {
+      await loadFile(file);
+    } else if (name.endsWith(".docx")) {
+      beginDocxImport(file, hasOpenProject ? "append" : "replace");
+    } else if (name.endsWith(".pptx")) {
+      beginPptxImport(file, hasOpenProject ? "append" : "replace");
+    } else {
+      pushToast({ tone: "warning", title: "Unsupported file", detail: runtimeFile.name });
+    }
+  }
 
   function getPageByNumber(pageNumber: number) {
     return pages.find((page) => page.pageNumber === pageNumber) ?? pages[0];
@@ -1207,7 +1400,7 @@ export function App() {
       }
       if (!isEditableElement(event.target) && key === "o") {
         event.preventDefault();
-        projectInput.current?.click();
+        void chooseProjectFile();
         return;
       }
       if (!isEditableElement(event.target) && key === "s") {
@@ -1464,6 +1657,7 @@ export function App() {
       setSavedProjectFingerprint("");
       setLastSavedAt(null);
       setLastAutosavedAt(null);
+      setDesktopProjectPath(null);
       setIsProjectDirty(true);
       setProjectStatusMessage("PDF opened as an untitled project. Use Save Project to create a .pproj file.");
       setPdfName(file.name);
@@ -3607,7 +3801,17 @@ export function App() {
       setWorkState({ message: "Preparing export", progress: 10 });
       const exportedPdf = await buildPdfFromPages(pages, marks, (message, progress) => setWorkState({ message, progress }));
       setWorkState({ message: "Saving PDF", progress: 90 });
-      downloadPdfBytes(await exportedPdf.save(), pdfName.replace(/\.pdf$/i, "") + "-edited.pdf");
+      const bytes = await exportedPdf.save();
+      const filename = pdfName.replace(/\.pdf$/i, "") + "-edited.pdf";
+      if (runtime.isDesktop) {
+        const result = await runtime.saveFile({ kind: "pdf", bytes, suggestedName: filename });
+        if (result?.saved && result.path) {
+          setLastExportPath(result.path);
+          setProjectStatusMessage(`Published PDF to ${filename}.`);
+        }
+      } else {
+        downloadPdfBytes(bytes, filename);
+      }
       setWorkState(null);
     } catch (error) {
       setWorkState(null);
@@ -3628,10 +3832,10 @@ export function App() {
         resolvedTheme={resolvedTheme}
         onThemeChange={changeThemeMode}
         onNewProject={startNewProject}
-        onOpenProject={() => projectInput.current?.click()}
-        onOpen={() => fileInput.current?.click()}
-        onImportDocx={() => docxInput.current?.click()}
-        onImportPptx={() => pptxInput.current?.click()}
+        onOpenProject={() => void chooseProjectFile()}
+        onOpen={() => void choosePdfFile()}
+        onImportDocx={() => void chooseDocxFile()}
+        onImportPptx={() => void choosePptxFile()}
         canSaveProject={hasOpenProject}
         canUndo={canUndo}
         canRedo={canRedo}
@@ -3680,8 +3884,8 @@ export function App() {
               <div className="dialog-actions">
                 <button className="button ghost" onClick={() => setIsProjectDialogOpen(false)}>Cancel</button>
                 <button className="button ghost" onClick={() => createNewProjectFromDraft("pdf")}>Create from PDF</button>
-                <button className="button ghost" onClick={() => { setIsProjectDialogOpen(false); docxInput.current?.click(); }}>Import Word document</button>
-                <button className="button ghost" onClick={() => { setIsProjectDialogOpen(false); pptxInput.current?.click(); }}>Import PowerPoint presentation</button>
+                <button className="button ghost" onClick={() => { setIsProjectDialogOpen(false); void chooseDocxFile(); }}>Import Word document</button>
+                <button className="button ghost" onClick={() => { setIsProjectDialogOpen(false); void choosePptxFile(); }}>Import PowerPoint presentation</button>
                 <button className="button primary" onClick={() => createNewProjectFromDraft("blank")}>Create Empty Project</button>
               </div>
             </div>
@@ -3916,6 +4120,24 @@ export function App() {
         />
       ) : null}
 
+      {isCloseGuardOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="close-guard-title">
+            <div className="modal-header">
+              <h2 id="close-guard-title">Unsaved changes</h2>
+            </div>
+            <div className="dialog-body">
+              <p className="dialog-note">Save changes to {projectMetadata.name || "this project"} before closing Publish Pro?</p>
+              <div className="dialog-actions">
+                <button className="button ghost" onClick={() => setIsCloseGuardOpen(false)}>Cancel</button>
+                <button className="button ghost" onClick={() => void discardAndCloseDesktop()}>Discard</button>
+                <button className="button primary" onClick={() => void saveAndCloseDesktop()}>Save</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       <nav className="main-toolbar" aria-label={`${activeWorkspaceItem.title} workspace tools`}>
         <div className="toolbar-context">
           <span>{activeWorkspaceItem.title}</span>
@@ -3989,8 +4211,8 @@ export function App() {
         ) : null}
         {activeWorkspace === "import" ? (
           <div className="toolbar-group" aria-label="Assembly tools">
-            <ToolButton icon={<Files />} label="Open PDF" onClick={() => fileInput.current?.click()} disabled={isBusy} />
-            <ToolButton icon={<Plus />} label="Import PDFs" onClick={() => importPdfInput.current?.click()} disabled={isBusy} />
+            <ToolButton icon={<Files />} label="Open PDF" onClick={() => void choosePdfFile()} disabled={isBusy} />
+            <ToolButton icon={<Plus />} label="Import PDFs" onClick={() => void choosePdfImports()} disabled={isBusy} />
             <ToolButton icon={<Files />} label="Combine files" onClick={() => setActivePageDialog("merge")} disabled={isBusy} />
             <ToolButton icon={<BookOpen />} label="Bookmarks" onClick={() => setLeftPanel("bookmarks")} disabled={isBusy} />
             <ToolButton icon={<FilePlus2 />} label="Insert blank pages" onClick={() => setActivePageDialog("blank")} disabled={isBusy} />
@@ -4148,13 +4370,13 @@ export function App() {
               <div className="workspace-panel-content">
                 <div className="project-quick-actions">
                   <button className="button ghost" onClick={startNewProject} disabled={isBusy}>New</button>
-                  <button className="button ghost" onClick={() => projectInput.current?.click()} disabled={isBusy}>Open Project</button>
-                  <button className="button primary" onClick={saveProject} disabled={isBusy || !hasOpenProject}>Save</button>
+                  <button className="button ghost" onClick={() => void chooseProjectFile()} disabled={isBusy}>Open Project</button>
+                  <button className="button primary" onClick={() => void saveProject()} disabled={isBusy || !hasOpenProject}>Save</button>
                 </div>
-                <ToolCard icon={<Files />} title="Open PDF" description="Open a PDF as the working document." onClick={() => fileInput.current?.click()} />
-                <ToolCard icon={<Files />} title="Import Word document" description="Convert DOCX content into Publish Pro pages while preserving the source file." onClick={() => docxInput.current?.click()} />
-                <ToolCard icon={<Files />} title="Import PowerPoint presentation" description="Convert PPTX slides into Publish Pro pages while preserving the source file." onClick={() => pptxInput.current?.click()} />
-                <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => importPdfInput.current?.click()} />
+                <ToolCard icon={<Files />} title="Open PDF" description="Open a PDF as the working document." onClick={() => void choosePdfFile()} />
+                <ToolCard icon={<Files />} title="Import Word document" description="Convert DOCX content into Publish Pro pages while preserving the source file." onClick={() => void chooseDocxFile()} />
+                <ToolCard icon={<Files />} title="Import PowerPoint presentation" description="Convert PPTX slides into Publish Pro pages while preserving the source file." onClick={() => void choosePptxFile()} />
+                <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => void choosePdfImports()} />
                 <ToolCard icon={<ImageIcon />} title="Add image asset" description="Import image artwork for publishing marks without placing it on a page." onClick={() => startProjectImageAssetImport({ kind: "projectAssets" })} />
                 <ToolCard icon={<PenLine />} title="Add signature asset" description="Add a local transparent PNG signature." onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} />
                 <ImportSourceManager
@@ -4526,18 +4748,30 @@ export function App() {
                 recentProjects={recentProjects}
                 autosave={autosaveCandidate}
                 onNewProject={startNewProject}
-                onOpenProject={() => projectInput.current?.click()}
-                onOpenPdf={() => fileInput.current?.click()}
-                onOpenDocx={() => docxInput.current?.click()}
-                onOpenPptx={() => pptxInput.current?.click()}
+                onOpenProject={() => void chooseProjectFile()}
+                onOpenPdf={() => void choosePdfFile()}
+                onOpenDocx={() => void chooseDocxFile()}
+                onOpenPptx={() => void choosePptxFile()}
                 onOpenRecent={reopenRecentProject}
                 onRemoveRecent={(id) => {
-                  removeRecentProject(id);
-                  setRecentProjects(loadRecentProjects());
+                  void (async () => {
+                    if (runtime.isDesktop) {
+                      await runtime.removeRecentProject(id);
+                    } else {
+                      removeBrowserRecentProject(id);
+                    }
+                    await refreshStoredRecentProjects();
+                  })();
                 }}
                 onClearRecent={() => {
-                  clearRecentProjects();
-                  setRecentProjects([]);
+                  void (async () => {
+                    if (runtime.isDesktop) {
+                      await runtime.clearRecentProjects();
+                    } else {
+                      clearBrowserRecentProjects();
+                    }
+                    setRecentProjects([]);
+                  })();
                 }}
                 onRestoreAutosave={restoreAutosave}
               />
@@ -4732,7 +4966,7 @@ export function App() {
               <button className="button ghost full-width" onClick={() => setActivePageDialog("merge")} disabled={isBusy} title="Combine PDF files" aria-label="Combine PDF files">
                 Combine PDFs
               </button>
-              <button className="button primary full-width" onClick={saveProject} disabled={isBusy || !hasOpenProject} title="Save Publish Pro project" aria-label="Save Publish Pro project">
+              <button className="button primary full-width" onClick={() => void saveProject()} disabled={isBusy || !hasOpenProject} title="Save Publish Pro project" aria-label="Save Publish Pro project">
                 Save Project
               </button>
             </div>
@@ -4758,6 +4992,12 @@ export function App() {
               <button className="button primary full-width" onClick={() => void exportPdf()} disabled={isBusy} title="Export edited PDF" aria-label="Export edited PDF">
                 Export PDF
               </button>
+              {runtime.isDesktop && lastExportPath ? (
+                <div className="dialog-actions compact">
+                  <button className="button ghost" onClick={() => void runtime.openPath(lastExportPath)} disabled={isBusy}>Open PDF</button>
+                  <button className="button ghost" onClick={() => void runtime.revealPath(lastExportPath)} disabled={isBusy}>Show in folder</button>
+                </div>
+              ) : null}
             </div>
           ) : null}
           {activeWorkspace === "review" && activeTool === "draw" ? (
