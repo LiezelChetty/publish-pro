@@ -14,6 +14,7 @@ type AppChromeProps = {
   onOpenProject: () => void;
   onOpen: () => void;
   onImportDocx: () => void;
+  onImportPptx: () => void;
   canSaveProject: boolean;
   onSaveProject: () => void;
   onSaveProjectAs: () => void;
@@ -39,6 +40,7 @@ export function AppChrome({
   onOpenProject,
   onOpen,
   onImportDocx,
+  onImportPptx,
   canSaveProject,
   onSaveProject,
   onSaveProjectAs,
@@ -79,6 +81,7 @@ export function AppChrome({
             <button onClick={onOpenProject} disabled={isBusy}><FolderOpen size={15} />Open Project</button>
             <button onClick={onOpen} disabled={isBusy}><FolderOpen size={15} />Open PDF</button>
             <button onClick={onImportDocx} disabled={isBusy}><FileText size={15} />Import Word document</button>
+            <button onClick={onImportPptx} disabled={isBusy}><FileText size={15} />Import PowerPoint presentation</button>
             <button onClick={onSaveProject} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project</button>
             <button onClick={onSaveProjectAs} disabled={isBusy || !canSaveProject}><Save size={15} />Save Project As</button>
             <button onClick={onCloseProject} disabled={isBusy || !canSaveProject}><X size={15} />Close Project</button>

@@ -54,8 +54,8 @@ export function buildProjectManifest(input: CreateProjectInput): ProjectManifest
     annotations: input.annotations,
     publishingSettings: input.publishingSettings ?? createDefaultPublishingSettings(),
     navigation: input.navigation,
-    sources: allAssets.filter((asset) => asset.type === "source-pdf" || asset.type === "source-docx"),
-    assets: allAssets.filter((asset) => asset.type !== "source-pdf" && asset.type !== "source-docx"),
+    sources: allAssets.filter((asset) => asset.type === "source-pdf" || asset.type === "source-docx" || asset.type === "source-pptx"),
+    assets: allAssets.filter((asset) => asset.type !== "source-pdf" && asset.type !== "source-docx" && asset.type !== "source-pptx"),
   };
 }
 

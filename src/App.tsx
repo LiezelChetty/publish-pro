@@ -126,6 +126,9 @@ import { createBookmarksFromDocxHeadings } from "./office/docxBookmarks";
 import { importDocxDocument } from "./office/docxImport";
 import { defaultDocxImportOptions, validateDocxImportFile } from "./office/validation";
 import type { DocxImportMetadata, DocxImportOptions, DocxImportReport, DocxSectionNumbering, DocxSourceMapping, DocxWordComment } from "./office/types";
+import { importPptxPresentation } from "./office/pptxImport";
+import { defaultPptxImportOptions, validatePptxImportFile } from "./office/pptxValidation";
+import type { PptxImportMetadata, PptxImportOptions, PptxImportReport, PptxSourceMapping } from "./office/pptxTypes";
 import {
   addRecentProject,
   clearRecentProjects,
@@ -173,6 +176,9 @@ type ProjectImageAsset = ProjectImageAssetLike & {
   naturalHeight: number;
   updatedAt: string;
 };
+
+type OfficeImportMetadata = DocxImportMetadata | PptxImportMetadata;
+type OfficeSourceMapping = DocxSourceMapping | PptxSourceMapping;
 
 type ProjectAssetImportTarget =
   | { kind: "projectAssets" }
@@ -247,8 +253,8 @@ type PageView = {
   pageNumber: number;
   sourceDocumentId?: string;
   sourcePageNumber?: number;
-  importMetadata?: DocxImportMetadata;
-  sourceMappings?: DocxSourceMapping[];
+  importMetadata?: OfficeImportMetadata;
+  sourceMappings?: OfficeSourceMapping[];
   width: number;
   height: number;
   rotation: number;
@@ -265,7 +271,7 @@ type SourceDocument = {
   name: string;
   bytes: Uint8Array;
   mimeType?: string;
-  importMetadata?: DocxImportMetadata;
+  importMetadata?: OfficeImportMetadata;
 };
 
 type BlankPagePreset = "a4Portrait" | "a4Landscape" | "a3Portrait" | "a3Landscape" | "letterPortrait" | "letterLandscape" | "legalPortrait" | "legalLandscape" | "matchCurrent" | "custom";
@@ -293,6 +299,14 @@ type DocxReimportImpact = {
   manualAnnotationsAffected: number;
   commentsAffected: number;
   manualBookmarksPreserved: number;
+  publishingSettingsPreserved: boolean;
+};
+
+type PptxReimportImpact = {
+  currentSlides: number;
+  currentBookmarks: number;
+  manualAnnotationsAffected: number;
+  speakerNotes: number;
   publishingSettingsPreserved: boolean;
 };
 
@@ -428,6 +442,11 @@ export function App() {
   const [docxImportMode, setDocxImportMode] = useState<"replace" | "append">("replace");
   const [docxImportReport, setDocxImportReport] = useState<DocxImportReport | null>(null);
   const [docxReimportTarget, setDocxReimportTarget] = useState<DocxImportMetadata | null>(null);
+  const [pendingPptxFile, setPendingPptxFile] = useState<File | null>(null);
+  const [pptxImportOptions, setPptxImportOptions] = useState<PptxImportOptions>(defaultPptxImportOptions);
+  const [pptxImportMode, setPptxImportMode] = useState<"replace" | "append">("replace");
+  const [pptxImportReport, setPptxImportReport] = useState<PptxImportReport | null>(null);
+  const [pptxReimportTarget, setPptxReimportTarget] = useState<PptxImportMetadata | null>(null);
   const [replaceFile, setReplaceFile] = useState<MergeQueueItem | null>(null);
   const [replaceSourcePage, setReplaceSourcePage] = useState(1);
   const [replacePreserveAnnotations, setReplacePreserveAnnotations] = useState(true);
@@ -446,6 +465,7 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const docxInput = useRef<HTMLInputElement>(null);
+  const pptxInput = useRef<HTMLInputElement>(null);
   const projectInput = useRef<HTMLInputElement>(null);
   const importPdfInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -461,8 +481,19 @@ export function App() {
   const docxImportGroups = useMemo(() => {
     const groups = new Map<string, { metadata: DocxImportMetadata; pages: PageView[]; warnings: number; mappings: number }>();
     for (const page of pages) {
-      if (!page.importMetadata) continue;
+      if (!page.importMetadata || isPptxImportMetadata(page.importMetadata)) continue;
       const existing = groups.get(page.importMetadata.importId) ?? { metadata: page.importMetadata, pages: [], warnings: page.importMetadata.warningCount, mappings: 0 };
+      existing.pages.push(page);
+      existing.mappings += page.sourceMappings?.length ?? 0;
+      groups.set(page.importMetadata.importId, existing);
+    }
+    return Array.from(groups.values());
+  }, [pages]);
+  const pptxImportGroups = useMemo(() => {
+    const groups = new Map<string, { metadata: PptxImportMetadata; pages: PageView[]; warnings: number; mappings: number; notes: number }>();
+    for (const page of pages) {
+      if (!page.importMetadata || !isPptxImportMetadata(page.importMetadata)) continue;
+      const existing = groups.get(page.importMetadata.importId) ?? { metadata: page.importMetadata, pages: [], warnings: page.importMetadata.warningCount, mappings: 0, notes: page.importMetadata.speakerNotes.length };
       existing.pages.push(page);
       existing.mappings += page.sourceMappings?.length ?? 0;
       groups.set(page.importMetadata.importId, existing);
@@ -482,6 +513,18 @@ export function App() {
       publishingSettingsPreserved: true,
     };
   }, [bookmarks, docxReimportTarget, marks, pages]);
+  const pptxReimportImpact = useMemo<PptxReimportImpact | null>(() => {
+    if (!pptxReimportTarget) return null;
+    const importedPageIds = pages.filter((page) => page.importMetadata?.importId === pptxReimportTarget.importId).map((page) => page.id);
+    const importedPageIdSet = new Set(importedPageIds);
+    return {
+      currentSlides: importedPageIds.length,
+      currentBookmarks: bookmarks.filter((bookmark) => importedPageIdSet.has(bookmark.pageId)).length,
+      manualAnnotationsAffected: marks.filter((mark) => mark.pageId && importedPageIdSet.has(mark.pageId)).length,
+      speakerNotes: pptxReimportTarget.speakerNotes.length,
+      publishingSettingsPreserved: true,
+    };
+  }, [bookmarks, marks, pages, pptxReimportTarget]);
   const selectedPageCount = selectedPageIds.filter((id) => pages.some((page) => page.id === id)).length;
   const activePageIds = selectedPageIds.length > 0 ? selectedPageIds.filter((id) => pages.some((page) => page.id === id)) : currentPageView ? [currentPageView.id] : [];
   const pageAnnotations = useMemo(() => countAnnotationsByPageId(marks, pages), [marks, pages]);
@@ -974,7 +1017,7 @@ export function App() {
     if (!asset) return;
     const nextName = window.prompt("Asset name", asset.name)?.trim();
     if (!nextName || nextName === asset.name) return;
-    if (asset.type === "source-pdf" || asset.type === "source-docx") {
+    if (asset.type === "source-pdf" || asset.type === "source-docx" || asset.type === "source-pptx") {
       setSourceDocuments((existing) => ({
         ...existing,
         ...(existing[assetId] ? { [assetId]: { ...existing[assetId], name: nextName } } : {}),
@@ -994,7 +1037,7 @@ export function App() {
       setErrorMessage(`${asset.name} is currently used in this project. Remove or replace the object before deleting the asset.`);
       return;
     }
-    if (asset.type === "source-pdf" || asset.type === "source-docx") {
+    if (asset.type === "source-pdf" || asset.type === "source-docx" || asset.type === "source-pptx") {
       setSourceDocuments((existing) => {
         const next = { ...existing };
         delete next[assetId];
@@ -1403,6 +1446,41 @@ export function App() {
     beginDocxImport(file, mode);
   }
 
+  function beginPptxImport(file: File, mode: "replace" | "append") {
+    try {
+      validatePptxImportFile(file);
+      setPendingPptxFile(file);
+      setPptxImportMode(mode);
+      setPptxImportOptions(defaultPptxImportOptions);
+      setPptxReimportTarget(null);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "The selected PowerPoint presentation could not be imported.");
+    }
+  }
+
+  function beginPptxReimport(metadata: PptxImportMetadata) {
+    const sourceId = metadata.originalSourceDocumentId;
+    const source = sourceId ? sourceDocuments[sourceId] : undefined;
+    if (!source || source.mimeType !== "application/vnd.openxmlformats-officedocument.presentationml.presentation") {
+      setErrorMessage("The original PPTX source is missing from this project. Re-import cannot continue until the source is restored.");
+      return;
+    }
+    const file = new File([source.bytes.slice()], source.name, { type: source.mimeType });
+    setPendingPptxFile(file);
+    setPptxImportMode("append");
+    setPptxImportOptions(metadata.options ?? defaultPptxImportOptions);
+    setPptxReimportTarget(metadata);
+    setErrorMessage("");
+  }
+
+  function handlePptxUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    beginPptxImport(file, hasOpenProject ? "append" : "replace");
+  }
+
   async function confirmDocxImport() {
     if (!pendingDocxFile) return;
     if (docxImportMode === "replace" && hasOpenProject && hasUnsavedChanges && !window.confirm("Import this Word document and discard unsaved changes in the current project?")) return;
@@ -1538,6 +1616,116 @@ export function App() {
     } catch (error) {
       setWorkState(null);
       setErrorMessage(error instanceof Error ? error.message : "The Word document could not be imported.");
+    }
+  }
+
+  async function confirmPptxImport() {
+    if (!pendingPptxFile) return;
+    if (pptxImportMode === "replace" && hasOpenProject && hasUnsavedChanges && !window.confirm("Import this PowerPoint presentation and discard unsaved changes in the current project?")) return;
+    try {
+      setErrorMessage("");
+      const result = await importPptxPresentation(pendingPptxFile, pptxImportOptions, (progress) => setWorkState({ message: progress.stage, progress: progress.progress }));
+      setWorkState({ message: "Rendering imported slides", progress: 88 });
+      const convertedPdf = await getDocument({ data: result.convertedPdfSource.bytes.slice() }).promise;
+      const importedPages: PageView[] = [];
+      for (let pageNumber = 1; pageNumber <= convertedPdf.numPages; pageNumber += 1) {
+        setWorkState({ message: `Rendering imported slide ${pageNumber} of ${convertedPdf.numPages}`, progress: 88 + (pageNumber / convertedPdf.numPages) * 8 });
+        const renderedPage = await renderPage(await convertedPdf.getPage(pageNumber), result.convertedPdfSource.id);
+        const slideTitle = result.importMetadata.slideTitles.find((title) => title.pageNumber === pageNumber);
+        importedPages.push({
+          ...renderedPage,
+          label: slideTitle?.hidden ? `${slideTitle.title} (hidden)` : slideTitle?.title,
+          importMetadata: result.importMetadata,
+          sourceMappings: result.sourceMappings.filter((mapping) => mapping.pageNumber === pageNumber),
+        });
+      }
+      const pageIdsByNumber = new Map(importedPages.map((page) => [page.sourcePageNumber ?? page.pageNumber, page.id]));
+      const importedBookmarks = pptxImportOptions.createBookmarks ? result.bookmarks.map((bookmark) => ({ ...bookmark, pageId: pageIdsByNumber.get(bookmark.order) ?? bookmark.pageId })) : [];
+      const importMetadata = pptxReimportTarget ? { ...result.importMetadata, revisionHistory: [result.importMetadata.revisionHistory[0], ...(pptxReimportTarget.revisionHistory ?? [])].filter(Boolean).slice(0, 2) } : result.importMetadata;
+      importedPages.forEach((page) => {
+        page.importMetadata = importMetadata;
+      });
+      const imageAssets = result.imageAssets
+        .filter((image): image is typeof image & { mimeType: "image/png" | "image/jpeg" } => image.mimeType === "image/png" || image.mimeType === "image/jpeg")
+        .map<ProjectImageAsset>((image) => ({
+          id: image.id,
+          name: image.name,
+          dataUrl: image.dataUrl,
+          mimeType: image.mimeType,
+          naturalWidth: image.width,
+          naturalHeight: image.height,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }));
+      const importedSources: Record<string, SourceDocument> = {
+        [result.convertedPdfSource.id]: { id: result.convertedPdfSource.id, name: result.convertedPdfSource.name, bytes: result.convertedPdfSource.bytes, mimeType: result.convertedPdfSource.mimeType, importMetadata },
+      };
+      if (result.originalSource) {
+        importedSources[result.originalSource.id] = { id: result.originalSource.id, name: result.originalSource.name, bytes: result.originalSource.bytes, mimeType: result.originalSource.mimeType, importMetadata };
+      }
+
+      if (pptxReimportTarget && hasOpenProject) {
+        const targetPageIndexes = pages.map((page, index) => ({ page, index })).filter((item) => item.page.importMetadata?.importId === pptxReimportTarget.importId);
+        const insertIndex = targetPageIndexes[0]?.index ?? getPageInsertionIndex("after");
+        const replacedPageIds = targetPageIndexes.map((item) => item.page.id);
+        const oldToNewPageId = new Map(replacedPageIds.map((pageId, index) => [pageId, importedPages[index]?.id]).filter((entry): entry is [string, string] => Boolean(entry[1])));
+        const retainedPages = pages.filter((page) => page.importMetadata?.importId !== pptxReimportTarget.importId);
+        const nextPages = renumberPages([...retainedPages.slice(0, insertIndex), ...importedPages, ...retainedPages.slice(insertIndex)]);
+        const nextMarks = marks.map((mark) => {
+          const nextPageId = mark.pageId ? oldToNewPageId.get(mark.pageId) : undefined;
+          if (!nextPageId) return mark;
+          const nextPage = nextPages.find((page) => page.id === nextPageId);
+          return nextPage ? { ...mark, pageId: nextPageId, page: nextPage.pageNumber } : mark;
+        }).filter((mark) => !mark.pageId || !replacedPageIds.includes(mark.pageId) || oldToNewPageId.has(mark.pageId));
+        setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
+        setProjectImageAssets((existing) => [...existing, ...imageAssets.filter((asset) => !existing.some((item) => item.dataUrl === asset.dataUrl))]);
+        commitDocument(nextPages, nextMarks, null, insertIndex + 1, importedPages.map((page) => page.id));
+        commitNavigation({ bookmarks: [...bookmarks.filter((bookmark) => !replacedPageIds.includes(bookmark.pageId)), ...importedBookmarks] });
+        setProjectStatusMessage(`Re-imported PowerPoint source ${pendingPptxFile.name}. Manual slide annotations were preserved where slide order still matched.`);
+      } else if (pptxImportMode === "append" && hasOpenProject) {
+        const insertIndex = getPageInsertionIndex("after");
+        const nextPages = renumberPages([...pages.slice(0, insertIndex), ...importedPages, ...pages.slice(insertIndex)]);
+        setSourceDocuments((existing) => ({ ...existing, ...importedSources }));
+        setProjectImageAssets((existing) => [...existing, ...imageAssets.filter((asset) => !existing.some((item) => item.dataUrl === asset.dataUrl))]);
+        commitDocument(nextPages, marks, null, insertIndex + 1, importedPages.map((page) => page.id));
+        commitNavigation({ bookmarks: [...bookmarks, ...importedBookmarks] });
+        setProjectStatusMessage(`Imported PowerPoint presentation ${pendingPptxFile.name} into the current project.`);
+      } else {
+        setHasOpenProject(true);
+        setProjectId(crypto.randomUUID());
+        setProjectMetadata(createProjectMetadata(result.projectName));
+        setSavedProjectFingerprint("");
+        setLastSavedAt(null);
+        setLastAutosavedAt(null);
+        setIsProjectDirty(true);
+        setProjectStatusMessage("PowerPoint presentation imported as an untitled Publish Pro project. Use Save Project to create a .pproj file.");
+        setPdfName(result.defaultPdfName);
+        setPdfBytes(result.convertedPdfSource.bytes);
+        setPdfDoc(null);
+        setActiveSourceDocumentId(result.convertedPdfSource.id);
+        setSourceDocuments(importedSources);
+        setProjectImageAssets(imageAssets);
+        setPages(importedPages);
+        setMarks([]);
+        resetNavigationState();
+        setBookmarks(importedBookmarks);
+        setPublishingSettings(createDefaultPublishingSettings());
+        setPublishingHistory({ past: [], future: [] });
+        setHistory({ past: [], future: [] });
+        setSelectedMark(null);
+        setSelectedPageIds(importedPages[0] ? [importedPages[0].id] : []);
+        setLastSelectedPageId(importedPages[0]?.id ?? null);
+        setCurrentPage(1);
+        setActiveWorkspace("assemble");
+        setLeftPanel(importedBookmarks.length > 0 ? "bookmarks" : "pages");
+      }
+      setPptxImportReport({ ...result.report, slidesImported: importedPages.length });
+      setPendingPptxFile(null);
+      setPptxReimportTarget(null);
+      setWorkState(null);
+    } catch (error) {
+      setWorkState(null);
+      setErrorMessage(error instanceof Error ? error.message : "The PowerPoint presentation could not be imported.");
     }
   }
 
@@ -2659,7 +2847,7 @@ export function App() {
   }
 
   function hasDocxFiles(files: FileList) {
-    return Array.from(files).some((file) => file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || file.name.toLowerCase().endsWith(".docx") || file.name.toLowerCase().endsWith(".doc"));
+    return Array.from(files).some((file) => file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || file.type === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || file.name.toLowerCase().endsWith(".docx") || file.name.toLowerCase().endsWith(".doc") || file.name.toLowerCase().endsWith(".pptx") || file.name.toLowerCase().endsWith(".ppt"));
   }
 
   function handlePagesPanelDragOver(event: ReactDragEvent<HTMLDivElement>) {
@@ -3358,6 +3546,7 @@ export function App() {
         onOpenProject={() => projectInput.current?.click()}
         onOpen={() => fileInput.current?.click()}
         onImportDocx={() => docxInput.current?.click()}
+        onImportPptx={() => pptxInput.current?.click()}
         canSaveProject={hasOpenProject}
         onSaveProject={saveProject}
         onSaveProjectAs={saveProjectAs}
@@ -3367,6 +3556,7 @@ export function App() {
       <input className="hidden-file-input" ref={projectInput} type="file" accept=".pproj,application/zip" onChange={handleProjectUpload} aria-label="Choose Publish Pro project file" />
       <input className="hidden-file-input" ref={fileInput} type="file" accept="application/pdf" onChange={handleUpload} aria-label="Choose PDF file" />
       <input className="hidden-file-input" ref={docxInput} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleDocxUpload} aria-label="Choose DOCX Word document" />
+      <input className="hidden-file-input" ref={pptxInput} type="file" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" onChange={handlePptxUpload} aria-label="Choose PPTX PowerPoint presentation" />
       <input className="hidden-file-input" ref={importPdfInput} type="file" accept="application/pdf" multiple onChange={handleImportPdf} aria-label="Choose PDFs to import" />
       <input className="hidden-file-input" ref={imageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleImageUpload} aria-label="Choose image file" />
       <input className="hidden-file-input" ref={projectImageInput} type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleProjectImageAssetUpload} aria-label="Choose project image asset" />
@@ -3401,6 +3591,7 @@ export function App() {
                 <button className="button ghost" onClick={() => setIsProjectDialogOpen(false)}>Cancel</button>
                 <button className="button ghost" onClick={() => createNewProjectFromDraft("pdf")}>Create from PDF</button>
                 <button className="button ghost" onClick={() => { setIsProjectDialogOpen(false); docxInput.current?.click(); }}>Import Word document</button>
+                <button className="button ghost" onClick={() => { setIsProjectDialogOpen(false); pptxInput.current?.click(); }}>Import PowerPoint presentation</button>
                 <button className="button primary" onClick={() => createNewProjectFromDraft("blank")}>Create Empty Project</button>
               </div>
             </div>
@@ -3435,6 +3626,35 @@ export function App() {
 
       {docxImportReport ? (
         <DocxImportReportDialog report={docxImportReport} onClose={() => setDocxImportReport(null)} />
+      ) : null}
+
+      {pendingPptxFile ? (
+        <PptxImportDialog
+          file={pendingPptxFile}
+          mode={pptxImportMode}
+          options={pptxImportOptions}
+          reimportTarget={pptxReimportTarget}
+          reimportImpact={pptxReimportImpact}
+          hasOpenProject={hasOpenProject}
+          isBusy={isBusy}
+          onModeChange={setPptxImportMode}
+          onOptionsChange={setPptxImportOptions}
+          onReplacementFile={(file) => {
+            try {
+              validatePptxImportFile(file);
+              setPendingPptxFile(file);
+              setErrorMessage("");
+            } catch (error) {
+              setErrorMessage(error instanceof Error ? error.message : "Choose a valid replacement PPTX file.");
+            }
+          }}
+          onCancel={() => { setPendingPptxFile(null); setPptxReimportTarget(null); }}
+          onImport={() => void confirmPptxImport()}
+        />
+      ) : null}
+
+      {pptxImportReport ? (
+        <PptxImportReportDialog report={pptxImportReport} onClose={() => setPptxImportReport(null)} />
       ) : null}
 
       {pageContextMenu ? (
@@ -3839,6 +4059,7 @@ export function App() {
                 </div>
                 <ToolCard icon={<Files />} title="Open PDF" description="Open a PDF as the working document." onClick={() => fileInput.current?.click()} />
                 <ToolCard icon={<Files />} title="Import Word document" description="Convert DOCX content into Publish Pro pages while preserving the source file." onClick={() => docxInput.current?.click()} />
+                <ToolCard icon={<Files />} title="Import PowerPoint presentation" description="Convert PPTX slides into Publish Pro pages while preserving the source file." onClick={() => pptxInput.current?.click()} />
                 <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => importPdfInput.current?.click()} />
                 <ToolCard icon={<ImageIcon />} title="Add image asset" description="Import image artwork for publishing marks without placing it on a page." onClick={() => startProjectImageAssetImport({ kind: "projectAssets" })} />
                 <ToolCard icon={<PenLine />} title="Add signature asset" description="Add a local transparent PNG signature." onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} />
@@ -4175,6 +4396,11 @@ export function App() {
                 beginDocxImport(docxFile, hasOpenProject ? "append" : "replace");
                 return;
               }
+              const pptxFile = files.find((file) => file.type === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || file.name.toLowerCase().endsWith(".pptx") || file.name.toLowerCase().endsWith(".ppt"));
+              if (pptxFile) {
+                beginPptxImport(pptxFile, hasOpenProject ? "append" : "replace");
+                return;
+              }
               const pdfFiles = files.filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
               const file = pdfFiles[0];
               if (!file) return;
@@ -4195,6 +4421,7 @@ export function App() {
                 onOpenProject={() => projectInput.current?.click()}
                 onOpenPdf={() => fileInput.current?.click()}
                 onOpenDocx={() => docxInput.current?.click()}
+                onOpenPptx={() => pptxInput.current?.click()}
                 onOpenRecent={reopenRecentProject}
                 onRemoveRecent={(id) => {
                   removeRecentProject(id);
@@ -4286,9 +4513,13 @@ export function App() {
               </div>
               {currentPageImportMetadata ? (
                 <div className="docx-import-status">
-                  <strong>Imported from Word</strong>
+                  <strong>{isPptxImportMetadata(currentPageImportMetadata) ? "Imported from PowerPoint" : "Imported from Word"}</strong>
                   <span>{currentPageImportMetadata.sourceName} · {currentPageImportMetadata.fidelityMode} · {currentPageView?.sourceMappings?.length ?? 0} mapped blocks</span>
-                  <button className="button ghost full-width" onClick={() => beginDocxReimport(currentPageImportMetadata)} disabled={isBusy || !currentPageImportMetadata.originalSourceDocumentId}>Re-import source</button>
+                  {isPptxImportMetadata(currentPageImportMetadata) ? (
+                    <button className="button ghost full-width" onClick={() => beginPptxReimport(currentPageImportMetadata)} disabled={isBusy || !currentPageImportMetadata.originalSourceDocumentId}>Re-import source</button>
+                  ) : (
+                    <button className="button ghost full-width" onClick={() => beginDocxReimport(currentPageImportMetadata)} disabled={isBusy || !currentPageImportMetadata.originalSourceDocumentId}>Re-import source</button>
+                  )}
                 </div>
               ) : null}
               <label>
@@ -4331,6 +4562,23 @@ export function App() {
                         <div className="dialog-actions compact">
                           <button className="button ghost" onClick={() => { setCurrentPage(group.pages[0]?.pageNumber ?? 1); setSelectedPageIds(group.pages[0] ? [group.pages[0].id] : []); }} disabled={!group.pages[0]}>Review</button>
                           <button className="button ghost" onClick={() => beginDocxReimport(group.metadata)} disabled={isBusy || !group.metadata.originalSourceDocumentId}>Re-import</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
+              {pptxImportGroups.length > 0 ? (
+                <details className="publishing-section" open>
+                  <summary>PowerPoint imports</summary>
+                  <div className="docx-import-list">
+                    {pptxImportGroups.map((group) => (
+                      <div className="docx-import-row" key={group.metadata.importId}>
+                        <strong>{group.metadata.sourceName}</strong>
+                        <span>{group.pages.length} slides · {group.metadata.fidelityMode} · {group.mappings} mappings · {group.notes} notes · {group.warnings} warnings</span>
+                        <div className="dialog-actions compact">
+                          <button className="button ghost" onClick={() => { setCurrentPage(group.pages[0]?.pageNumber ?? 1); setSelectedPageIds(group.pages[0] ? [group.pages[0].id] : []); }} disabled={!group.pages[0]}>Review</button>
+                          <button className="button ghost" onClick={() => beginPptxReimport(group.metadata)} disabled={isBusy || !group.metadata.originalSourceDocumentId}>Re-import</button>
                         </div>
                       </div>
                     ))}
@@ -6208,6 +6456,7 @@ type WelcomeScreenProps = {
   onOpenProject: () => void;
   onOpenPdf: () => void;
   onOpenDocx: () => void;
+  onOpenPptx: () => void;
   onOpenRecent: (project: RecentProject) => void;
   onRemoveRecent: (id: string) => void;
   onClearRecent: () => void;
@@ -6351,9 +6600,189 @@ function normalizeDocxImportOptions(options: DocxImportOptions): DocxImportOptio
   };
 }
 
+function isPptxImportMetadata(metadata: OfficeImportMetadata): metadata is PptxImportMetadata {
+  return (metadata as PptxImportMetadata).kind === "pptx";
+}
+
+function PptxImportDialog({
+  file,
+  mode,
+  options,
+  reimportTarget,
+  reimportImpact,
+  hasOpenProject,
+  isBusy,
+  onModeChange,
+  onOptionsChange,
+  onReplacementFile,
+  onCancel,
+  onImport,
+}: {
+  file: File;
+  mode: "replace" | "append";
+  options: PptxImportOptions;
+  reimportTarget: PptxImportMetadata | null;
+  reimportImpact: PptxReimportImpact | null;
+  hasOpenProject: boolean;
+  isBusy: boolean;
+  onModeChange: (mode: "replace" | "append") => void;
+  onOptionsChange: (options: PptxImportOptions) => void;
+  onReplacementFile: (file: File) => void;
+  onCancel: () => void;
+  onImport: () => void;
+}) {
+  const update = (patch: Partial<PptxImportOptions>) => onOptionsChange({ ...options, ...patch });
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="pptx-import-title">
+        <div className="modal-header">
+          <h2 id="pptx-import-title">Import PowerPoint presentation</h2>
+          <button className="panel-icon-button" onClick={onCancel} aria-label="Close PowerPoint import dialog" title="Close dialog">x</button>
+        </div>
+        <div className="dialog-body">
+          <p className="dialog-note">
+            {reimportTarget
+              ? "Publish Pro will re-import this preserved PowerPoint source and replace only the previous generated slide pages after conversion succeeds."
+              : "Publish Pro converts PPTX slides into project pages. This is slide-to-page publishing import, not full PowerPoint editing."}
+          </p>
+          <div className="import-summary">
+            <strong>{file.name}</strong>
+            <span>{formatAssetSize(file.size)} · PPTX</span>
+          </div>
+          {reimportTarget ? (
+            <div className="validation-list">
+              <strong>Re-import impact preview</strong>
+              <div className="validation-row"><span>{reimportImpact?.currentSlides ?? 0} imported slides will be replaced after conversion succeeds.</span></div>
+              <div className="validation-row"><span>{reimportImpact?.currentBookmarks ?? 0} slide-title bookmarks will be regenerated.</span></div>
+              <div className="validation-row"><span>{reimportImpact?.manualAnnotationsAffected ?? 0} manual annotations are remapped by slide order where possible.</span></div>
+              <div className="validation-row"><span>{reimportImpact?.speakerNotes ?? 0} speaker notes are tracked in metadata. Publishing settings are preserved.</span></div>
+              <label>
+                Replacement PPTX
+                <input
+                  type="file"
+                  accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                  onChange={(event) => {
+                    const replacement = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    if (replacement) onReplacementFile(replacement);
+                  }}
+                  disabled={isBusy}
+                />
+              </label>
+            </div>
+          ) : null}
+          <label>
+            Fidelity
+            <select value={options.fidelityMode} onChange={(event) => update({ fidelityMode: event.currentTarget.value as PptxImportOptions["fidelityMode"] })}>
+              <option value="fast">Fast - simplified slide rendering</option>
+              <option value="balanced">Balanced - recommended</option>
+              <option value="high">High Fidelity - preserves more metadata</option>
+            </select>
+          </label>
+          {hasOpenProject ? (
+            <label>
+              Import mode
+              <select value={mode} onChange={(event) => onModeChange(event.currentTarget.value as "replace" | "append")} disabled={Boolean(reimportTarget)}>
+                <option value="append">Import into current project</option>
+                <option value="replace">Create project from PowerPoint</option>
+              </select>
+            </label>
+          ) : null}
+          <div className="checkbox-stack">
+            <label className="checkbox-row"><input type="checkbox" checked={options.preserveSource} onChange={(event) => update({ preserveSource: event.currentTarget.checked })} />Preserve original PPTX in project sources</label>
+            <label className="checkbox-row"><input type="checkbox" checked={options.createBookmarks} onChange={(event) => update({ createBookmarks: event.currentTarget.checked })} />Create bookmarks from slide titles</label>
+            <label className="checkbox-row"><input type="checkbox" checked={options.includeHiddenSlides} onChange={(event) => update({ includeHiddenSlides: event.currentTarget.checked })} />Include hidden slides and mark them clearly</label>
+          </div>
+          <p className="dialog-note">Legacy `.ppt` files, animations, transitions, and full PowerPoint editing are not supported in this phase.</p>
+          <div className="dialog-actions">
+            <button className="button ghost" onClick={onCancel} disabled={isBusy}>Cancel</button>
+            <button className="button primary" onClick={onImport} disabled={isBusy}>{reimportTarget ? "Re-import PowerPoint" : "Import PowerPoint"}</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PptxImportReportDialog({ report, onClose }: { report: PptxImportReport; onClose: () => void }) {
+  const categories = Array.from(new Set(report.warnings.map((warning) => warning.category ?? "general")));
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const visibleWarnings = categoryFilter === "all" ? report.warnings : report.warnings.filter((warning) => (warning.category ?? "general") === categoryFilter);
+  const copyReport = () => {
+    void navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
+  };
+  const downloadReport = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `publish-pro-pptx-import-${report.importId}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="pptx-report-title">
+        <div className="modal-header">
+          <h2 id="pptx-report-title">PowerPoint import report</h2>
+          <button className="panel-icon-button" onClick={onClose} aria-label="Close PowerPoint import report" title="Close report">x</button>
+        </div>
+        <div className="dialog-body">
+          <div className="project-stats-grid">
+            <div><strong>{report.slidesImported}</strong><span>Slides</span></div>
+            <div><strong>{report.hiddenSlides}</strong><span>Hidden</span></div>
+            <div><strong>{report.slideSections}</strong><span>Sections</span></div>
+            <div><strong>{report.textBoxes}</strong><span>Text boxes</span></div>
+            <div><strong>{report.images}</strong><span>Images</span></div>
+            <div><strong>{report.shapes}</strong><span>Shapes</span></div>
+            <div><strong>{report.tables}</strong><span>Tables</span></div>
+            <div><strong>{report.charts}</strong><span>Charts</span></div>
+            <div><strong>{report.speakerNotes}</strong><span>Notes</span></div>
+            <div><strong>{report.hyperlinks}</strong><span>Links</span></div>
+          </div>
+          <div className="import-review-summary">
+            <span>{report.fidelityMode}</span>
+            <span>Parse {Math.round(report.parseTimeMs)}ms</span>
+            <span>Render {Math.round(report.renderTimeMs)}ms</span>
+            <span>Total {Math.round(report.totalTimeMs)}ms</span>
+            <span>Rev {report.revision.sourceHash.slice(0, 8)}</span>
+          </div>
+          {report.fontSubstitutions.length > 0 ? (
+            <div className="validation-list">
+              <strong>Font substitutions</strong>
+              {report.fontSubstitutions.map((item, index) => <div className="validation-row warning" key={`pptx-font-${index}`}><AlertTriangle size={15} /><span>{item}</span></div>)}
+            </div>
+          ) : null}
+          {report.warnings.length > 0 ? (
+            <div className="validation-list">
+              <div className="dialog-actions compact">
+                <strong>Import warnings</strong>
+                <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.currentTarget.value)} aria-label="Filter PowerPoint import warnings">
+                  <option value="all">All warnings</option>
+                  {categories.map((category) => <option value={category} key={category}>{category}</option>)}
+                </select>
+              </div>
+              {visibleWarnings.map((warning, index) => (
+                <div className="validation-row warning" key={`${warning.code}-${index}`}>
+                  <AlertTriangle size={15} />
+                  <span>{warning.message}{warning.pageNumber ? ` Slide ${warning.pageNumber}.` : ""}</span>
+                </div>
+              ))}
+            </div>
+          ) : <p className="dialog-note">Import completed without warnings.</p>}
+          <div className="dialog-actions">
+            <button className="button ghost" onClick={copyReport}>Copy report</button>
+            <button className="button ghost" onClick={downloadReport}>Download JSON</button>
+            <button className="button primary" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function createWordCommentMarks(wordComments: DocxWordComment[], importedPages: PageView[]): Mark[] {
   const pagesByNumber = new Map(importedPages.map((page) => [page.pageNumber, page]));
-  const mappingsByBlockId = new Map(importedPages.flatMap((page) => (page.sourceMappings ?? []).map((mapping) => [mapping.blockId, { page, mapping }] as const)));
+  const mappingsByBlockId = new Map(importedPages.flatMap((page) => (page.sourceMappings ?? []).flatMap((mapping) => ("blockId" in mapping ? [[mapping.blockId, { page, mapping }]] : []))));
   return wordComments.flatMap((wordComment) => {
     const mapped = wordComment.blockId ? mappingsByBlockId.get(wordComment.blockId) : undefined;
     const page = mapped?.page ?? pagesByNumber.get(1) ?? importedPages[0];
@@ -6750,6 +7179,7 @@ function WelcomeScreen({
   onOpenProject,
   onOpenPdf,
   onOpenDocx,
+  onOpenPptx,
   onOpenRecent,
   onRemoveRecent,
   onClearRecent,
@@ -6778,6 +7208,9 @@ function WelcomeScreen({
         <button className="button ghost" onClick={onOpenDocx}>
           Import Word document
         </button>
+        <button className="button ghost" onClick={onOpenPptx}>
+          Import PowerPoint presentation
+        </button>
       </div>
       {autosave ? (
         <button className="autosave-banner" onClick={onRestoreAutosave}>
@@ -6787,7 +7220,7 @@ function WelcomeScreen({
       ) : null}
       <div className="welcome-drop-zone">
         <Files size={28} />
-        <strong>Drop a PDF, DOCX, or .pproj file here</strong>
+        <strong>Drop a PDF, DOCX, PPTX, or .pproj file here</strong>
         <span>Files stay local in your browser.</span>
       </div>
       <div className="recent-projects">

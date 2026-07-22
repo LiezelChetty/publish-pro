@@ -100,11 +100,13 @@ export function collectProjectAssets(
 
 function getSourceAssetType(source: SourceLike) {
   if (source.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || source.name.toLowerCase().endsWith(".docx")) return "source-docx" as const;
+  if (source.mimeType === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || source.name.toLowerCase().endsWith(".pptx")) return "source-pptx" as const;
   return "source-pdf" as const;
 }
 
 function getSourceExtension(source: SourceLike) {
   if (source.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || source.name.toLowerCase().endsWith(".docx")) return ".docx";
+  if (source.mimeType === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || source.name.toLowerCase().endsWith(".pptx")) return ".pptx";
   return ".pdf";
 }
 

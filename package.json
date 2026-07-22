@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "fixtures:docx": "node scripts/generate-docx-fixtures.mjs",
+    "fixtures:pptx": "node scripts/generate-pptx-fixtures.mjs",
     "validate:pdf": "node scripts/validate-export.mjs",
     "validate:navigation": "node scripts/validate-navigation-export.mjs",
     "preview": "vite preview"
