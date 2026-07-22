@@ -32,6 +32,14 @@ export function addTocLinks(pdf: PDFDocument, tocPages: PDFPage[], allPages: PDF
       width: line.width,
       height: line.height,
     });
+    if (line.pageText) {
+      addInternalLinkAnnotation(pdf, tocPage, targetPage, {
+        x: Math.max(line.x, tocPage.getWidth() - 96),
+        y: line.y - 2,
+        width: 88,
+        height: line.height,
+      });
+    }
   }
 }
 

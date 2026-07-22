@@ -4605,6 +4605,20 @@ nav.left-nav.workspace-nav .workspace-button {
   color: #1f2937;
 }
 
+.numbering-section-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgb(248 250 252 / 0.82);
+}
+
+.numbering-section-row > small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .recent-project-row {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -4919,12 +4933,14 @@ nav.left-nav.workspace-nav .workspace-button {
 }
 
 :root[data-theme="dark"] .bookmark-tree-row,
-:root[data-theme="dark"] .navigation-preview-row {
+:root[data-theme="dark"] .navigation-preview-row,
+:root[data-theme="dark"] .numbering-section-row {
   color: #f8fafc;
 }
 
 :root[data-theme="dark"] .bookmark-title-button small,
 :root[data-theme="dark"] .navigation-preview-row small,
+:root[data-theme="dark"] .numbering-section-row > small,
 :root[data-theme="dark"] .bookmark-row-actions button {
   color: #94a3b8;
 }

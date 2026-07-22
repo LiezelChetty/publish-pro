@@ -68,6 +68,7 @@ export type NavigationState = {
   tocSettings: TocSettings;
   manualTocEntries: TocManualEntry[];
   generatedToc?: TocGeneratedPageMetadata;
+  numberingSections?: import("../publishing/numberingSections").NumberingSection[];
 };
 
 export type PageReference = {

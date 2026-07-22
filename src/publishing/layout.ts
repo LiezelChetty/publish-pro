@@ -1,5 +1,6 @@
 import { resolvePublishingPageIds } from "./pageRanges";
 import { formatPageNumber, renderPublishingTokens } from "./tokens";
+import type { ResolvedPageNumber } from "./numberingResolver";
 import type { HeaderFooterZone, HeaderFooterZoneImage, PublishingPageLike, PublishingPreviewItem, PublishingSettings, PublishingTokenContext, PublishingUnit, PublishingZone } from "./types";
 
 export function unitToPoints(value: number, unit: PublishingUnit) {
@@ -17,6 +18,7 @@ export function getPublishingPreviewItems({
   selectedPageIds,
   tokenContext,
   imageAssetIds = [],
+  resolvedPageNumbers,
 }: {
   settings: PublishingSettings;
   page: PublishingPageLike;
@@ -25,6 +27,7 @@ export function getPublishingPreviewItems({
   selectedPageIds: string[];
   tokenContext: Omit<PublishingTokenContext, "pageNumber" | "pageCount" | "pageLabel">;
   imageAssetIds?: string[];
+  resolvedPageNumbers?: Map<string, ResolvedPageNumber>;
 }): PublishingPreviewItem[] {
   const items: PublishingPreviewItem[] = [];
   const context = {
@@ -81,9 +84,11 @@ export function getPublishingPreviewItems({
   }
 
   if (settings.pageNumbers.enabled && resolvePublishingPageIds(settings.pageNumbers.target, pages, currentPage, selectedPageIds).has(page.id)) {
-    const pageValue = settings.pageNumbers.startNumber + page.pageNumber - 1 + settings.pageNumbers.offset;
-    const formatted = formatPageNumber(settings.pageNumbers.format, pageValue, pages.length, settings.pageNumbers.customTemplate);
-    const template = settings.pageNumbers.format === "custom" ? formatted : `${settings.pageNumbers.prefix}${formatted}${settings.pageNumbers.suffix}`;
+    const resolved = resolvedPageNumbers?.get(page.id);
+    const pageValue = resolved?.value ?? settings.pageNumbers.startNumber + page.pageNumber - 1 + settings.pageNumbers.offset;
+    const formatted = resolved?.display ?? formatPageNumber(settings.pageNumbers.format, pageValue, pages.length, settings.pageNumbers.customTemplate);
+    const template = resolved ? formatted : settings.pageNumbers.format === "custom" ? formatted : `${settings.pageNumbers.prefix}${formatted}${settings.pageNumbers.suffix}`;
+    if (resolved && !resolved.included) return items;
     const margin = unitToPoints(settings.pageNumbers.distanceFromEdge, settings.pageNumbers.unit);
     const offset = unitToPoints(settings.pageNumbers.horizontalOffset, settings.pageNumbers.unit);
     items.push({

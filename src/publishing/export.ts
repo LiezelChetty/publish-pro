@@ -1,5 +1,6 @@
 import { degrees, PDFDocument, rgb, StandardFonts, type PDFFont, type PDFImage } from "pdf-lib";
 import { getPublishingPreviewItems } from "./layout";
+import type { ResolvedPageNumber } from "./numberingResolver";
 import type { PublishingPageLike, PublishingSettings, PublishingTextStyle, PublishingTokenContext } from "./types";
 
 type ImageAsset = {
@@ -16,6 +17,7 @@ export async function drawPublishingMarksToPdf({
   currentPage,
   selectedPageIds,
   imageAssets,
+  resolvedPageNumbers,
   layer,
 }: {
   pdf: PDFDocument;
@@ -25,6 +27,7 @@ export async function drawPublishingMarksToPdf({
   currentPage: number;
   selectedPageIds: string[];
   imageAssets: ImageAsset[];
+  resolvedPageNumbers?: Map<string, ResolvedPageNumber>;
   layer: "watermark" | "foreground";
 }) {
   const fontCache = new Map<string, PDFFont>();
@@ -43,6 +46,7 @@ export async function drawPublishingMarksToPdf({
       selectedPageIds,
       tokenContext,
       imageAssetIds: imageAssets.map((asset) => asset.id),
+      resolvedPageNumbers,
     });
 
     for (const item of previewItems) {

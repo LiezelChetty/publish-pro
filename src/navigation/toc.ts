@@ -49,7 +49,7 @@ export function buildTocEntries(bookmarks: DocumentBookmark[], manualEntries: To
   return entries;
 }
 
-export function layoutToc(entries: TocEntry[], pages: PageReference[], settings: TocSettings): TocLayoutResult {
+export function layoutToc(entries: TocEntry[], pages: PageReference[], settings: TocSettings, resolvedPageText = new Map<string, string>()): TocLayoutResult {
   const pageSize = getTocPageSize(settings.pageSize);
   const lineHeight = settings.fontSize * settings.lineSpacing;
   const usableWidth = pageSize.width - settings.marginLeft - settings.marginRight;
@@ -60,7 +60,7 @@ export function layoutToc(entries: TocEntry[], pages: PageReference[], settings:
   let cursorY = pageSize.height - settings.marginTop - settings.fontSize * 2.6;
   for (const entry of entries) {
     const page = pageById.get(entry.pageId);
-    const pageText = page ? getTocPageText(page, settings) : "Missing";
+    const pageText = page ? getTocPageText(page, settings, resolvedPageText) : "Missing";
     const indent = Math.max(0, entry.level - 1) * settings.indent;
     const maxTitleChars = Math.max(16, Math.floor((usableWidth - indent - 48) / (settings.fontSize * 0.52)));
     const wrapped = wrapTitle(entry.title, maxTitleChars);
@@ -88,8 +88,10 @@ export function layoutToc(entries: TocEntry[], pages: PageReference[], settings:
   return result;
 }
 
-export function getTocPageText(page: PageReference, settings: TocSettings) {
+export function getTocPageText(page: PageReference, settings: TocSettings, resolvedPageText = new Map<string, string>()) {
   if (settings.includePageLabels && page.label) return page.label;
+  const resolved = resolvedPageText.get(page.id);
+  if (resolved) return resolved;
   if (settings.includePageNumbers) return String(page.pageNumber);
   return "";
 }

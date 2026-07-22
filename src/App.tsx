@@ -94,6 +94,9 @@ import { AppChrome, type ThemeMode } from "./components/app-shell/AppChrome";
 import { createDefaultHeaderFooterImage, createDefaultPublishingSettings, mergeHeaderFooterZone, mergePublishingSettings, publishingWatermarkPresets } from "./publishing/defaults";
 import { drawPublishingMarksToPdf } from "./publishing/export";
 import { getPublishingPreviewItems } from "./publishing/layout";
+import { createNumberingSection, duplicateNumberingSection, type NumberingSection } from "./publishing/numberingSections";
+import { defaultLegacyNumberingSection, getNumberingSummary, getResolvedPageText, resolveNumberingSections } from "./publishing/numberingResolver";
+import { validateNumberingSections } from "./publishing/numberingValidation";
 import { getPageRangeError } from "./publishing/pageRanges";
 import { deletePublishingPreset, loadPublishingPresets, savePublishingPreset, type PublishingPreset } from "./publishing/presets";
 import type { HeaderFooterZone, HeaderFooterZoneImage, PublishingNumberFormat, PublishingPositionPreset, PublishingSettings, PublishingTargetMode, PublishingUnit, PublishingZone, PublishingZoneImageLayout } from "./publishing/types";
@@ -117,6 +120,7 @@ import {
 import { addPdfOutline, addTocLinks } from "./navigation/pdfOutline";
 import { buildTocEntries, getTocPageSize, layoutToc } from "./navigation/toc";
 import { validateNavigation } from "./navigation/validation";
+import { validateExportLinks } from "./navigation/linkValidation";
 import type { DocumentBookmark, NavigationState, PageReference, TocGeneratedPageMetadata, TocLayoutResult, TocManualEntry, TocSettings } from "./navigation/types";
 import {
   addRecentProject,
@@ -363,6 +367,7 @@ export function App() {
   const [tocSettings, setTocSettings] = useState<TocSettings>(createDefaultTocSettings());
   const [manualTocEntries, setManualTocEntries] = useState<TocManualEntry[]>([]);
   const [generatedToc, setGeneratedToc] = useState<TocGeneratedPageMetadata | undefined>(undefined);
+  const [numberingSections, setNumberingSections] = useState<NumberingSection[]>([]);
   const [navigationHistory, setNavigationHistory] = useState<NavigationHistoryState>({ past: [], future: [] });
   const [activeTool, setActiveTool] = useState<Tool>("select");
   const [penColor, setPenColor] = useState("#111827");
@@ -469,6 +474,12 @@ export function App() {
   );
   const visibleBookmarks = useMemo(() => getVisibleBookmarkTree(bookmarks), [bookmarks]);
   const tocEntries = useMemo(() => buildTocEntries(bookmarks, manualTocEntries, pageReferences, tocSettings), [bookmarks, manualTocEntries, pageReferences, tocSettings]);
+  const resolvedPageNumbers = useMemo(
+    () => resolveNumberingSections(pages, numberingSections, publishingSettings.pageNumbers.customTemplate),
+    [pages, numberingSections, publishingSettings.pageNumbers.customTemplate]
+  );
+  const numberingIssues = useMemo(() => validateNumberingSections(pages, numberingSections), [pages, numberingSections]);
+  const numberingSummary = useMemo(() => getNumberingSummary(pages, numberingSections, publishingSettings.pageNumbers.customTemplate), [pages, numberingSections, publishingSettings.pageNumbers.customTemplate]);
   const navigationIssues = useMemo(
     () => validateNavigation({ bookmarks, manualEntries: manualTocEntries, pages: pageReferences, generatedToc }),
     [bookmarks, manualTocEntries, pageReferences, generatedToc]
@@ -505,6 +516,7 @@ export function App() {
       tocSettings,
       manualTocEntries,
       generatedToc,
+      numberingSections,
     };
   }
 
@@ -514,6 +526,7 @@ export function App() {
     setTocSettings(createDefaultTocSettings());
     setManualTocEntries([]);
     setGeneratedToc(undefined);
+    setNumberingSections([]);
     setNavigationHistory({ past: [], future: [] });
   }
 
@@ -523,6 +536,7 @@ export function App() {
     setTocSettings({ ...createDefaultTocSettings(), ...(navigation?.tocSettings ?? {}) });
     setManualTocEntries(navigation?.manualTocEntries ?? []);
     setGeneratedToc(navigation?.generatedToc);
+    setNumberingSections(navigation?.numberingSections ?? []);
     setNavigationHistory({ past: [], future: [] });
   }
 
@@ -533,6 +547,7 @@ export function App() {
       bookmarks: next.bookmarks ?? bookmarks,
       tocSettings: next.tocSettings ?? tocSettings,
       manualTocEntries: next.manualTocEntries ?? manualTocEntries,
+      numberingSections: next.numberingSections ?? numberingSections,
       generatedToc: hasGeneratedTocPatch ? next.generatedToc : markTocStale && generatedToc ? { ...generatedToc, stale: true } : generatedToc,
     };
     if (JSON.stringify(before) === JSON.stringify(after)) return;
@@ -544,6 +559,7 @@ export function App() {
     setTocSettings(after.tocSettings);
     setManualTocEntries(after.manualTocEntries);
     setGeneratedToc(after.generatedToc);
+    setNumberingSections(after.numberingSections ?? []);
     setIsProjectDirty(true);
   }
 
@@ -665,6 +681,7 @@ export function App() {
       tocSettings: { ...createDefaultTocSettings(), ...(bundle.manifest.navigation?.tocSettings ?? {}) },
       manualTocEntries: bundle.manifest.navigation?.manualTocEntries ?? [],
       generatedToc: bundle.manifest.navigation?.generatedToc,
+      numberingSections: bundle.manifest.navigation?.numberingSections ?? [],
     };
     setHasOpenProject(true);
     setProjectId(bundle.manifest.projectId);
@@ -2087,7 +2104,8 @@ export function App() {
   }
 
   function insertOrRegenerateToc() {
-    const layout = layoutToc(tocEntries, pageReferences.filter((page) => !generatedToc?.pageIds.includes(page.id)), tocSettings);
+    const visiblePages = pageReferences.filter((page) => !generatedToc?.pageIds.includes(page.id));
+    const layout = layoutToc(tocEntries, visiblePages, tocSettings, getResolvedPageTextMap(visiblePages));
     const existingTocIds = new Set(generatedToc?.pageIds ?? []);
     const pagesWithoutOldToc = pages.filter((page) => !existingTocIds.has(page.id));
     const insertIndex = getTocInsertionIndex(pagesWithoutOldToc);
@@ -2133,6 +2151,74 @@ export function App() {
       updatedAt: now,
     };
     commitNavigation({ manualTocEntries: [...manualTocEntries, entry] });
+  }
+
+  function addNumberingSection(label = "Section") {
+    const page = pages.find((item) => item.pageNumber === currentPage) ?? pages[0];
+    if (!page) return;
+    commitNavigation({ numberingSections: [...numberingSections, createNumberingSection(page.id, label)] });
+  }
+
+  function getResolvedPageTextMap(pageSet: PageReference[]) {
+    return new Map(pageSet.map((page) => [page.id, getResolvedPageText(page, resolvedPageNumbers)]));
+  }
+
+  function updateNumberingSection(sectionId: string, patch: Partial<NumberingSection>) {
+    commitNavigation({
+      numberingSections: numberingSections.map((section) => (section.id === sectionId ? { ...section, ...patch } : section)),
+    });
+  }
+
+  function deleteNumberingSection(sectionId: string) {
+    commitNavigation({ numberingSections: numberingSections.filter((section) => section.id !== sectionId) });
+  }
+
+  function duplicateSection(section: NumberingSection) {
+    commitNavigation({ numberingSections: [...numberingSections, duplicateNumberingSection(section)] });
+  }
+
+  function moveNumberingSection(sectionId: string, direction: -1 | 1) {
+    const index = numberingSections.findIndex((section) => section.id === sectionId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= numberingSections.length) return;
+    const next = [...numberingSections];
+    const [section] = next.splice(index, 1);
+    next.splice(target, 0, section);
+    commitNavigation({ numberingSections: next });
+  }
+
+  function createDefaultNumberingWorkflow() {
+    if (pages.length === 0) return;
+    const tocPages = pages.filter((page) => page.generatedToc);
+    const firstNonToc = pages.find((page) => !page.generatedToc && page.pageNumber > 1) ?? pages[1] ?? pages[0];
+    const appendixStart = pages.find((page) => /appendix/i.test(page.label ?? "")) ?? pages[pages.length - 3] ?? firstNonToc;
+    const sections: NumberingSection[] = [
+      { ...createNumberingSection(pages[0].id, "Cover"), includeNumbering: false, includeInTotal: false, endPageId: pages[0].id },
+    ];
+    if (tocPages.length > 0) {
+      sections.push({
+        ...createNumberingSection(tocPages[0].id, "TOC"),
+        endPageId: tocPages[tocPages.length - 1].id,
+        format: "romanLower",
+        startValue: 1,
+        includeInTotal: false,
+      });
+    }
+    sections.push({
+      ...createNumberingSection(firstNonToc.id, "Main Report"),
+      endPageId: appendixStart.id === firstNonToc.id ? undefined : pages[Math.max(0, pages.findIndex((page) => page.id === appendixStart.id) - 1)]?.id,
+      format: "decimal",
+      startValue: 1,
+    });
+    if (appendixStart && appendixStart.id !== firstNonToc.id) {
+      sections.push({
+        ...createNumberingSection(appendixStart.id, "Appendix"),
+        format: "decimal",
+        prefix: "A-",
+        startValue: 1,
+      });
+    }
+    commitNavigation({ numberingSections: sections });
   }
 
   function updateManualTocEntry(entryId: string, patch: Partial<TocManualEntry>) {
@@ -2590,6 +2676,7 @@ export function App() {
         setTocSettings(previous.tocSettings);
         setManualTocEntries(previous.manualTocEntries);
         setGeneratedToc(previous.generatedToc);
+        setNumberingSections(previous.numberingSections ?? []);
         return {
           past: existing.past.slice(0, -1),
           future: [current, ...existing.future],
@@ -2637,6 +2724,7 @@ export function App() {
         setTocSettings(next.tocSettings);
         setManualTocEntries(next.manualTocEntries);
         setGeneratedToc(next.generatedToc);
+        setNumberingSections(next.numberingSections ?? []);
         return {
           past: [...existing.past, current].slice(-MAX_HISTORY_ENTRIES),
           future: existing.future.slice(1),
@@ -2738,6 +2826,7 @@ export function App() {
       currentPage: publishingTargetContext.currentPage ?? currentPage,
       selectedPageIds: publishingTargetContext.selectedPageIds ?? selectedPageIds,
       imageAssets: publishingImageAssets,
+      resolvedPageNumbers,
       layer: "watermark",
     });
 
@@ -2937,6 +3026,7 @@ export function App() {
       currentPage: publishingTargetContext.currentPage ?? currentPage,
       selectedPageIds: publishingTargetContext.selectedPageIds ?? selectedPageIds,
       imageAssets: publishingImageAssets,
+      resolvedPageNumbers,
       layer: "foreground",
     });
 
@@ -2949,7 +3039,7 @@ export function App() {
     const tocPageViews = exportPages.filter((page) => page.generatedToc);
     if (tocPageViews.length === 0) return { tocPages: [], lines: [] };
     const nonTocPages = exportPages.filter((page) => !page.generatedToc).map(pageToReference);
-    const layout = layoutToc(buildTocEntries(bookmarks, manualTocEntries, nonTocPages, tocSettings), nonTocPages, tocSettings);
+    const layout = layoutToc(buildTocEntries(bookmarks, manualTocEntries, nonTocPages, tocSettings), nonTocPages, tocSettings, getResolvedPageTextMap(nonTocPages));
     const font = await pdf.embedFont(getTocStandardFontName(tocSettings.fontFamily, false));
     const boldFont = await pdf.embedFont(getTocStandardFontName(tocSettings.fontFamily, true));
     const tocPages = tocPageViews
@@ -3625,6 +3715,48 @@ export function App() {
                   </div>
                   <label>Units<select value={publishingSettings.pageNumbers.unit} onChange={(event) => { const unit = event.currentTarget.value as PublishingUnit; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, unit } })); }}><option value="mm">Millimetres</option><option value="cm">Centimetres</option><option value="in">Inches</option><option value="pt">Points</option></select></label>
                   <PublishingTargetControls target={publishingSettings.pageNumbers.target} pageCount={pages.length} onChange={(target) => updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, target } }))} />
+                  <details className="publishing-zone-control">
+                    <summary>Numbering Sections</summary>
+                    <div className="project-quick-actions">
+                      <button className="button ghost" type="button" onClick={() => addNumberingSection()} disabled={isBusy}>Add section</button>
+                      <button className="button ghost" type="button" onClick={createDefaultNumberingWorkflow} disabled={isBusy}>Cover / TOC / Main / Appendix</button>
+                      <button className="button ghost" type="button" onClick={() => {
+                        const first = pages[0];
+                        if (first) commitNavigation({ numberingSections: [defaultLegacyNumberingSection(first.id, publishingSettings.pageNumbers.format, publishingSettings.pageNumbers.startNumber, publishingSettings.pageNumbers.prefix, publishingSettings.pageNumbers.suffix)] });
+                      }} disabled={isBusy}>Use legacy settings</button>
+                    </div>
+                    {numberingIssues.map((issue) => <p className="field-error" key={issue.id}>{issue.message}</p>)}
+                    <div className="navigation-preview-list">
+                      {numberingSummary.length > 0 ? numberingSummary.map(({ section, text }) => (
+                        <div className="numbering-section-row" key={section.id}>
+                          <input value={section.label} onChange={(event) => updateNumberingSection(section.id, { label: event.currentTarget.value })} aria-label="Numbering section label" />
+                          <small>{text}</small>
+                          <div className="page-field-grid">
+                            <label>Start<select value={section.startPageId} onChange={(event) => updateNumberingSection(section.id, { startPageId: event.currentTarget.value })}>{pages.map((page) => <option key={page.id} value={page.id}>{page.label || `Page ${page.pageNumber}`}</option>)}</select></label>
+                            <label>End<select value={section.endPageId ?? ""} onChange={(event) => updateNumberingSection(section.id, { endPageId: event.currentTarget.value || undefined })}><option value="">Auto</option>{pages.map((page) => <option key={page.id} value={page.id}>{page.label || `Page ${page.pageNumber}`}</option>)}</select></label>
+                          </div>
+                          <div className="page-field-grid">
+                            <label>Format<select value={section.format} onChange={(event) => updateNumberingSection(section.id, { format: event.currentTarget.value as PublishingNumberFormat })}>{pageNumberFormatOptions.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}</select></label>
+                            <label>Start<input type="number" min="1" value={section.startValue} onChange={(event) => updateNumberingSection(section.id, { startValue: Math.max(1, Number(event.currentTarget.value) || 1) })} /></label>
+                          </div>
+                          <div className="page-field-grid">
+                            <label>Prefix<input value={section.prefix} onChange={(event) => updateNumberingSection(section.id, { prefix: event.currentTarget.value })} /></label>
+                            <label>Suffix<input value={section.suffix} onChange={(event) => updateNumberingSection(section.id, { suffix: event.currentTarget.value })} /></label>
+                          </div>
+                          <label className="checkbox-row"><input type="checkbox" checked={section.includeNumbering} onChange={(event) => updateNumberingSection(section.id, { includeNumbering: event.currentTarget.checked })} />Show numbering</label>
+                          <label className="checkbox-row"><input type="checkbox" checked={section.includeInTotal} onChange={(event) => updateNumberingSection(section.id, { includeInTotal: event.currentTarget.checked })} />Include in total</label>
+                          <label className="checkbox-row"><input type="checkbox" checked={section.restart} onChange={(event) => updateNumberingSection(section.id, { restart: event.currentTarget.checked })} />Restart numbering</label>
+                          <label className="checkbox-row"><input type="checkbox" checked={section.usePageLabel} onChange={(event) => updateNumberingSection(section.id, { usePageLabel: event.currentTarget.checked })} />Display page label</label>
+                          <div className="bookmark-row-actions">
+                            <button type="button" onClick={() => moveNumberingSection(section.id, -1)}>Up</button>
+                            <button type="button" onClick={() => moveNumberingSection(section.id, 1)}>Down</button>
+                            <button type="button" onClick={() => duplicateSection(section)}>Duplicate</button>
+                            <button type="button" onClick={() => deleteNumberingSection(section.id)}>Delete</button>
+                          </div>
+                        </div>
+                      )) : <p className="muted-text">No numbering sections. Legacy page numbering is still used until you add sections.</p>}
+                    </div>
+                  </details>
                   <PublishingStyleControls style={publishingSettings.pageNumbers.style} onChange={(style) => updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, style: { ...settings.pageNumbers.style, ...style } } }))} />
                   <button className="button ghost full-width" onClick={() => saveCurrentPublishingPreset("pageNumbers")}>Save page-number preset</button>
                 </details>
@@ -3846,6 +3978,7 @@ export function App() {
                     selectedPageIds,
                     tokenContext: getPublishingTokenContext(),
                     imageAssetIds: publishingImageAssets.map((asset) => asset.id),
+                    resolvedPageNumbers,
                   })}
                   publishingImageAssets={publishingImageAssets}
                   onSelect={setSelectedMark}
