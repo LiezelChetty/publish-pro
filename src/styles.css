@@ -4603,3 +4603,217 @@ nav.left-nav.workspace-nav .workspace-button {
 :root[data-theme="dark"] .asset-actions button:hover:not(:disabled) {
   background: rgb(30 41 59 / 0.76);
 }
+
+.publishing-preview-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.publishing-safe-area {
+  position: absolute;
+  border: 1px dashed rgb(216 52 42 / 0.32);
+  border-radius: 2px;
+}
+
+.publishing-preview-item {
+  position: absolute;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.2;
+  transform-origin: center center;
+  user-select: none;
+}
+
+.publishing-watermark {
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.publishing-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid rgb(148 163 184 / 0.18);
+}
+
+.publishing-section summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #111827;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 850;
+  list-style: none;
+}
+
+.publishing-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.publishing-section summary::after {
+  content: "⌄";
+  color: #94a3b8;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.publishing-section[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.publishing-section label,
+.publishing-target-controls label,
+.publishing-style-controls label {
+  display: grid;
+  gap: 6px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.publishing-section input,
+.publishing-section select,
+.publishing-style-controls input,
+.publishing-style-controls select,
+.publishing-target-controls input,
+.publishing-target-controls select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid rgb(148 163 184 / 0.28);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #111827;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.publishing-section input[type="color"] {
+  padding: 3px;
+}
+
+.publishing-section input[type="range"] {
+  padding: 0;
+}
+
+.publishing-section .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.publishing-section .checkbox-row input {
+  width: 16px;
+  height: 16px;
+}
+
+.publishing-target-controls,
+.publishing-style-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.publishing-advanced-groups {
+  display: grid;
+  gap: 8px;
+}
+
+.publishing-advanced-group {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgb(248 250 252 / 0.72);
+}
+
+.publishing-advanced-group summary {
+  font-size: 12px;
+}
+
+.publishing-target-controls label:first-child,
+.publishing-target-controls label:nth-child(2),
+.publishing-style-controls label:first-child {
+  grid-column: 1 / -1;
+}
+
+.preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgb(248 250 252 / 0.76);
+}
+
+.preset-row strong {
+  overflow: hidden;
+  color: #172033;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-error,
+.status-message.compact {
+  margin: 0;
+  color: #c92f27;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+:root[data-theme="dark"] .publishing-section {
+  border-top-color: rgb(148 163 184 / 0.14);
+}
+
+:root[data-theme="dark"] .publishing-section summary,
+:root[data-theme="dark"] .preset-row strong {
+  color: #f8fafc;
+}
+
+:root[data-theme="dark"] .publishing-section label,
+:root[data-theme="dark"] .publishing-target-controls label,
+:root[data-theme="dark"] .publishing-style-controls label {
+  color: #94a3b8;
+}
+
+:root[data-theme="dark"] .publishing-section input,
+:root[data-theme="dark"] .publishing-section select,
+:root[data-theme="dark"] .publishing-style-controls input,
+:root[data-theme="dark"] .publishing-style-controls select,
+:root[data-theme="dark"] .publishing-target-controls input,
+:root[data-theme="dark"] .publishing-target-controls select {
+  border-color: rgb(148 163 184 / 0.2);
+  background: rgb(15 23 42 / 0.42);
+  color: #f8fafc;
+}
+
+:root[data-theme="dark"] .publishing-section .checkbox-row {
+  color: #e2e8f0;
+}
+
+:root[data-theme="dark"] .preset-row {
+  background: rgb(15 23 42 / 0.42);
+}
+
+:root[data-theme="dark"] .publishing-advanced-group {
+  background: rgb(15 23 42 / 0.42);
+}

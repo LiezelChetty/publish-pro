@@ -1,5 +1,7 @@
+import type { PublishingSettings } from "../publishing/types";
+
 export const PROJECT_FORMAT = "publish-pro-project";
-export const PROJECT_FORMAT_VERSION = 1;
+export const PROJECT_FORMAT_VERSION = 2;
 
 export type ProjectAssetType = "source-pdf" | "image" | "signature" | "other";
 export type ProjectAssetStatus = "available" | "missing" | "invalid";
@@ -48,6 +50,7 @@ export type ProjectManifest = {
   exportSettings: ProjectExportSettings;
   pages: unknown[];
   annotations: unknown[];
+  publishingSettings: PublishingSettings;
   sources: ProjectAssetManifest[];
   assets: ProjectAssetManifest[];
 };

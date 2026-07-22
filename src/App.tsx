@@ -88,6 +88,12 @@ import {
   type ShapeStyle,
 } from "./shapes";
 import { AppChrome, type ThemeMode } from "./components/app-shell/AppChrome";
+import { createDefaultPublishingSettings, mergePublishingSettings, publishingWatermarkPresets } from "./publishing/defaults";
+import { drawPublishingMarksToPdf } from "./publishing/export";
+import { getPublishingPreviewItems } from "./publishing/layout";
+import { getPageRangeError } from "./publishing/pageRanges";
+import { deletePublishingPreset, loadPublishingPresets, savePublishingPreset, type PublishingPreset } from "./publishing/presets";
+import type { PublishingNumberFormat, PublishingPositionPreset, PublishingSettings, PublishingTargetMode, PublishingUnit, PublishingZone } from "./publishing/types";
 import { collectProjectAssets, formatAssetSize } from "./projects/assets";
 import { createProjectMetadata, type ProjectMetadata } from "./projects/schema";
 import { buildProjectManifest, deserializeProject, serializeProject } from "./projects/serialization";
@@ -293,6 +299,10 @@ export function App() {
   const [savedProjectFingerprint, setSavedProjectFingerprint] = useState("");
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => loadRecentProjects());
   const [autosaveCandidate, setAutosaveCandidate] = useState<ProjectAutosave | null>(null);
+  const [publishingSettings, setPublishingSettings] = useState<PublishingSettings>(() => createDefaultPublishingSettings());
+  const [publishingHistory, setPublishingHistory] = useState<{ past: PublishingSettings[]; future: PublishingSettings[] }>({ past: [], future: [] });
+  const [publishingPresets, setPublishingPresets] = useState<PublishingPreset[]>(() => loadPublishingPresets());
+  const [publishingValidationMessage, setPublishingValidationMessage] = useState("");
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [lastAutosavedAt, setLastAutosavedAt] = useState<string | null>(null);
   const [projectStatusMessage, setProjectStatusMessage] = useState("");
@@ -375,8 +385,8 @@ export function App() {
   const pageAnnotations = useMemo(() => countAnnotationsByPageId(marks, pages), [marks, pages]);
   const projectAssets = useMemo(() => collectProjectAssets(sourceDocuments, pages, marks), [sourceDocuments, pages, marks]);
   const currentProjectFingerprint = useMemo(
-    () => getProjectFingerprint(projectId, projectMetadata, pages, marks, sourceDocuments, pdfName),
-    [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName]
+    () => getProjectFingerprint(projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings),
+    [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings]
   );
   const hasUnsavedChanges = hasOpenProject && (isProjectDirty || currentProjectFingerprint !== savedProjectFingerprint);
   const visibleComments = comments.filter((mark) => {
@@ -384,8 +394,8 @@ export function App() {
     return (showAllComments || mark.page === currentPage) && commentMatchesFilter(mark.comment.resolved, commentFilter);
   });
   const isBusy = workState !== null;
-  const canUndo = history.past.length > 0 && !isBusy;
-  const canRedo = history.future.length > 0 && !isBusy;
+  const canUndo = (history.past.length > 0 || publishingHistory.past.length > 0) && !isBusy;
+  const canRedo = (history.future.length > 0 || publishingHistory.future.length > 0) && !isBusy;
   const filteredPages = useMemo(() => {
     if (!query.trim()) return pages;
     const normalized = query.trim().toLowerCase();
@@ -423,6 +433,7 @@ export function App() {
       metadata: projectMetadata,
       pages,
       annotations: marks,
+      publishingSettings,
       sourceDocuments,
       workspaceState: {
         currentPage,
@@ -468,6 +479,8 @@ export function App() {
     setSourceDocuments({});
     setPages([blankPage]);
     setMarks([]);
+    setPublishingSettings(createDefaultPublishingSettings());
+    setPublishingHistory({ past: [], future: [] });
     setHistory({ past: [], future: [] });
     setSelectedMark(null);
     setSelectedPageIds([blankPage.id]);
@@ -509,7 +522,8 @@ export function App() {
     setHasOpenProject(true);
     setProjectId(bundle.manifest.projectId);
     setProjectMetadata(bundle.manifest.metadata);
-    setSavedProjectFingerprint(getProjectFingerprint(bundle.manifest.projectId, bundle.manifest.metadata, nextPages, syncedMarks, nextSources, bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, "")));
+    const nextPublishingSettings = mergePublishingSettings(bundle.manifest.publishingSettings);
+    setSavedProjectFingerprint(getProjectFingerprint(bundle.manifest.projectId, bundle.manifest.metadata, nextPages, syncedMarks, nextSources, bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, ""), nextPublishingSettings));
     setPdfName(bundle.manifest.exportSettings.defaultFileName || fileName.replace(/\.pproj$/i, ""));
     setPdfBytes(firstSource?.bytes ?? null);
     setPdfDoc(null);
@@ -517,6 +531,8 @@ export function App() {
     setSourceDocuments(nextSources);
     setPages(nextPages);
     setMarks(syncedMarks);
+    setPublishingSettings(nextPublishingSettings);
+    setPublishingHistory({ past: [], future: [] });
     setHistory({ past: [], future: [] });
     setSelectedMark(null);
     setCurrentPage(Math.min(Math.max(1, bundle.manifest.workspaceState.currentPage || 1), Math.max(1, nextPages.length)));
@@ -575,6 +591,8 @@ export function App() {
     setSourceDocuments({});
     setPages(demoPages);
     setMarks(initialMarks);
+    setPublishingSettings(createDefaultPublishingSettings());
+    setPublishingHistory({ past: [], future: [] });
     setHistory({ past: [], future: [] });
     setSelectedMark("demo-title");
     setSelectedPageIds([demoPages[0].id]);
@@ -607,6 +625,52 @@ export function App() {
     setProjectMetadata((metadata) => ({ ...metadata, ...patch, modifiedAt: new Date().toISOString() }));
     if (patch.name) setPdfName(patch.name);
     setIsProjectDirty(true);
+  }
+
+  function updatePublishingSettings(updater: (settings: PublishingSettings) => PublishingSettings, recordHistory = true) {
+    setPublishingSettings((existing) => {
+      const next = mergePublishingSettings(updater(existing));
+      if (JSON.stringify(existing) === JSON.stringify(next)) return existing;
+      if (recordHistory) {
+        setPublishingHistory((historyState) => ({
+          past: [...historyState.past.slice(-49), existing],
+          future: [],
+        }));
+      }
+      setIsProjectDirty(true);
+      setPublishingValidationMessage(validatePublishingSettings(next));
+      return next;
+    });
+  }
+
+  function applyPublishingPreset(preset: PublishingPreset) {
+    updatePublishingSettings((settings) => mergePublishingSettings({ ...settings, ...preset.settings }));
+  }
+
+  function saveCurrentPublishingPreset(type: PublishingPreset["type"]) {
+    const name = window.prompt("Preset name", type === "watermark" ? "Watermark preset" : type === "pageNumbers" ? "Page numbering preset" : "Header footer preset")?.trim();
+    if (!name) return;
+    const preset: PublishingPreset = {
+      id: crypto.randomUUID(),
+      name,
+      type,
+      createdAt: new Date().toISOString(),
+      settings:
+        type === "watermark"
+          ? { watermark: publishingSettings.watermark }
+          : type === "pageNumbers"
+          ? { pageNumbers: publishingSettings.pageNumbers }
+          : { headerFooter: publishingSettings.headerFooter },
+    };
+    savePublishingPreset(preset);
+    setPublishingPresets(loadPublishingPresets());
+  }
+
+  function renamePublishingPreset(preset: PublishingPreset) {
+    const name = window.prompt("Preset name", preset.name)?.trim();
+    if (!name || name === preset.name) return;
+    savePublishingPreset({ ...preset, name });
+    setPublishingPresets(loadPublishingPresets());
   }
 
   function locateProjectAsset(assetId: string) {
@@ -742,6 +806,15 @@ export function App() {
 
   function withPageId(mark: Mark, pageNumber = mark.page): Mark {
     return { ...mark, pageId: mark.pageId ?? getPageIdForNumber(pageNumber), page: pageNumber };
+  }
+
+  function getPublishingTokenContext() {
+    return {
+      projectName: projectMetadata.name || pdfName.replace(/\.pdf$/i, ""),
+      client: projectMetadata.client,
+      filename: pdfName,
+      date: new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date()),
+    };
   }
 
   useEffect(() => {
@@ -984,6 +1057,8 @@ export function App() {
       setActiveSourceDocumentId(sourceId);
       setPdfDoc(loaded);
       setMarks([]);
+      setPublishingSettings(createDefaultPublishingSettings());
+      setPublishingHistory({ past: [], future: [] });
       setHistory({ past: [], future: [] });
       setSelectedMark(null);
       setSelectedPageIds([]);
@@ -2062,6 +2137,18 @@ export function App() {
   }
 
   function undo() {
+    if (history.past.length === 0 && publishingHistory.past.length > 0) {
+      setPublishingHistory((existing) => {
+        const previous = existing.past[existing.past.length - 1];
+        if (!previous) return existing;
+        setPublishingSettings(previous);
+        return {
+          past: existing.past.slice(0, -1),
+          future: [publishingSettings, ...existing.future],
+        };
+      });
+      return;
+    }
     setHistory((existing) => {
       const entry = existing.past[existing.past.length - 1];
       if (!entry) return existing;
@@ -2081,6 +2168,18 @@ export function App() {
   }
 
   function redo() {
+    if (history.future.length === 0 && publishingHistory.future.length > 0) {
+      setPublishingHistory((existing) => {
+        const next = existing.future[0];
+        if (!next) return existing;
+        setPublishingSettings(next);
+        return {
+          past: [...existing.past, publishingSettings].slice(-50),
+          future: existing.future.slice(1),
+        };
+      });
+      return;
+    }
     setHistory((existing) => {
       const entry = existing.future[0];
       if (!entry) return existing;
@@ -2099,7 +2198,12 @@ export function App() {
     });
   }
 
-  async function buildPdfFromPages(exportPages: PageView[], exportMarks: Mark[], onProgress?: (message: string, progress: number) => void) {
+  async function buildPdfFromPages(
+    exportPages: PageView[],
+    exportMarks: Mark[],
+    onProgress?: (message: string, progress: number) => void,
+    publishingTargetContext: { currentPage?: number; selectedPageIds?: string[] } = {}
+  ) {
     const exportedPdf = await PDFDocument.create();
     const loadedSourcePdfs = new Map<string, PDFDocument>();
     async function getSourcePdf(sourceDocumentId: string) {
@@ -2149,6 +2253,19 @@ export function App() {
         if (pageView.rotation) page.setRotation(degrees(pageView.rotation));
       }
     }
+
+    await drawPublishingMarksToPdf({
+      pdf: exportedPdf,
+      pages: exportPages,
+      settings: publishingSettings,
+      tokenContext: getPublishingTokenContext(),
+      currentPage: publishingTargetContext.currentPage ?? currentPage,
+      selectedPageIds: publishingTargetContext.selectedPageIds ?? selectedPageIds,
+      imageAssets: marks
+        .filter((mark) => (mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl)
+        .map((mark) => ({ id: mark.id, dataUrl: mark.imageDataUrl, mimeType: mark.imageMimeType })),
+      layer: "watermark",
+    });
 
     const pageIdToExportIndex = new Map(exportPages.map((page, index) => [page.id, index]));
     for (const [index, mark] of exportMarks.entries()) {
@@ -2334,12 +2451,26 @@ export function App() {
       });
     }
 
+    await drawPublishingMarksToPdf({
+      pdf: exportedPdf,
+      pages: exportPages,
+      settings: publishingSettings,
+      tokenContext: getPublishingTokenContext(),
+      currentPage: publishingTargetContext.currentPage ?? currentPage,
+      selectedPageIds: publishingTargetContext.selectedPageIds ?? selectedPageIds,
+      imageAssets: marks
+        .filter((mark) => (mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl)
+        .map((mark) => ({ id: mark.id, dataUrl: mark.imageDataUrl, mimeType: mark.imageMimeType })),
+      layer: "foreground",
+    });
+
     appendCommentsSummary(exportedPdf, helvetica, helveticaBold, exportMarks.filter((mark) => mark.kind === "comment" && mark.comment));
     return exportedPdf;
   }
 
   useEffect(() => {
-    if (!import.meta.env.DEV) return;
+    const isLocalValidationHost = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    if (!import.meta.env.DEV && !isLocalValidationHost) return;
     const validationWindow = window as Window & {
       __publishProExportForValidation?: () => Promise<{ bytes: number[]; pageCount: number; dimensions: { width: number; height: number }[] }>;
     };
@@ -2356,7 +2487,7 @@ export function App() {
     return () => {
       delete validationWindow.__publishProExportForValidation;
     };
-  }, [marks, pages, sourceDocuments]);
+  }, [currentPage, marks, pages, pdfName, projectMetadata, publishingSettings, selectedPageIds, sourceDocuments]);
 
   async function exportPdf() {
     try {
@@ -2866,9 +2997,124 @@ export function App() {
               <div className="workspace-panel-content publish-summary">
                 <div className="publish-ready">
                   <Download size={24} />
-                  <strong>Ready to export</strong>
-                  <span>{pages.length} pages · {marks.length} edits · {comments.length} comments</span>
+                  <strong>Output Preview</strong>
+                  <span>{pages.length} pages · {marks.length} edits · {comments.length} comments · publishing marks previewed live</span>
                 </div>
+                {publishingValidationMessage ? <p className="status-message error compact" role="alert">{publishingValidationMessage}</p> : null}
+                <details className="publishing-section" open>
+                  <summary>Page Numbers</summary>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={publishingSettings.pageNumbers.enabled}
+                      onChange={(event) => {
+                        const enabled = event.currentTarget.checked;
+                        updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, enabled } }));
+                      }}
+                    />
+                    Enable page numbers
+                  </label>
+                  <label>Position<select value={publishingSettings.pageNumbers.zone} onChange={(event) => { const zone = event.currentTarget.value as PublishingZone; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, zone } })); }}>{publishingZoneOptions.map((zone) => <option key={zone.value} value={zone.value}>{zone.label}</option>)}</select></label>
+                  <label>Format<select value={publishingSettings.pageNumbers.format} onChange={(event) => { const format = event.currentTarget.value as PublishingNumberFormat; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, format } })); }}>{pageNumberFormatOptions.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}</select></label>
+                  {publishingSettings.pageNumbers.format === "custom" ? <label>Template<input value={publishingSettings.pageNumbers.customTemplate} onChange={(event) => { const customTemplate = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, customTemplate } }), false); }} placeholder="Page {page} of {pages}" /></label> : null}
+                  <div className="page-field-grid">
+                    <label>Start<input type="number" value={publishingSettings.pageNumbers.startNumber} onChange={(event) => { const startNumber = Number(event.currentTarget.value) || 1; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, startNumber } })); }} /></label>
+                    <label>Offset<input type="number" value={publishingSettings.pageNumbers.offset} onChange={(event) => { const offset = Number(event.currentTarget.value) || 0; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, offset } })); }} /></label>
+                  </div>
+                  <div className="page-field-grid">
+                    <label>Prefix<input value={publishingSettings.pageNumbers.prefix} onChange={(event) => { const prefix = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, prefix } }), false); }} /></label>
+                    <label>Suffix<input value={publishingSettings.pageNumbers.suffix} onChange={(event) => { const suffix = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, suffix } }), false); }} /></label>
+                  </div>
+                  <div className="page-field-grid">
+                    <label>Distance<input type="number" min="0" value={publishingSettings.pageNumbers.distanceFromEdge} onChange={(event) => { const distanceFromEdge = Math.max(0, Number(event.currentTarget.value) || 0); updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, distanceFromEdge } })); }} /></label>
+                    <label>Horizontal offset<input type="number" value={publishingSettings.pageNumbers.horizontalOffset} onChange={(event) => { const horizontalOffset = Number(event.currentTarget.value) || 0; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, horizontalOffset } })); }} /></label>
+                  </div>
+                  <label>Units<select value={publishingSettings.pageNumbers.unit} onChange={(event) => { const unit = event.currentTarget.value as PublishingUnit; updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, unit } })); }}><option value="mm">Millimetres</option><option value="cm">Centimetres</option><option value="in">Inches</option><option value="pt">Points</option></select></label>
+                  <PublishingTargetControls target={publishingSettings.pageNumbers.target} pageCount={pages.length} onChange={(target) => updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, target } }))} />
+                  <PublishingStyleControls style={publishingSettings.pageNumbers.style} onChange={(style) => updatePublishingSettings((settings) => ({ ...settings, pageNumbers: { ...settings.pageNumbers, style: { ...settings.pageNumbers.style, ...style } } }))} />
+                  <button className="button ghost full-width" onClick={() => saveCurrentPublishingPreset("pageNumbers")}>Save page-number preset</button>
+                </details>
+                <details className="publishing-section">
+                  <summary>Headers & Footers</summary>
+                  <label className="checkbox-row"><input type="checkbox" checked={publishingSettings.headerFooter.enabled} onChange={(event) => { const enabled = event.currentTarget.checked; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, enabled } })); }} />Enable headers and footers</label>
+                  <label className="checkbox-row"><input type="checkbox" checked={publishingSettings.headerFooter.advanced} onChange={(event) => { const advanced = event.currentTarget.checked; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, advanced } })); }} />Advanced odd/even/first page mode</label>
+                  <label>Header left<input value={publishingSettings.headerFooter.header.left.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, header: { ...settings.headerFooter.header, left: { text } } } }), false); }} /></label>
+                  <label>Header centre<input value={publishingSettings.headerFooter.header.center.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, header: { ...settings.headerFooter.header, center: { text } } } }), false); }} /></label>
+                  <label>Header right<input value={publishingSettings.headerFooter.header.right.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, header: { ...settings.headerFooter.header, right: { text } } } }), false); }} /></label>
+                  <label>Footer left<input value={publishingSettings.headerFooter.footer.left.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, footer: { ...settings.headerFooter.footer, left: { text } } } }), false); }} /></label>
+                  <label>Footer centre<input value={publishingSettings.headerFooter.footer.center.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, footer: { ...settings.headerFooter.footer, center: { text } } } }), false); }} /></label>
+                  <label>Footer right<input value={publishingSettings.headerFooter.footer.right.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, footer: { ...settings.headerFooter.footer, right: { text } } } }), false); }} /></label>
+                  {publishingSettings.headerFooter.advanced ? (
+                    <PublishingAdvancedHeaderFooterControls
+                      settings={publishingSettings}
+                      onChange={(key, zone, value) => updatePublishingSettings((settings) => ({
+                        ...settings,
+                        headerFooter: {
+                          ...settings.headerFooter,
+                          [key]: {
+                            ...(settings.headerFooter[key] ?? {}),
+                            [zone]: value,
+                          },
+                        },
+                      }), false)}
+                    />
+                  ) : null}
+                  <div className="page-field-grid">
+                    <label>Margin<input type="number" min="0" value={publishingSettings.headerFooter.margin} onChange={(event) => { const margin = Math.max(0, Number(event.currentTarget.value) || 0); updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, margin } })); }} /></label>
+                    <label>Units<select value={publishingSettings.headerFooter.unit} onChange={(event) => { const unit = event.currentTarget.value as PublishingUnit; updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, unit } })); }}><option value="mm">Millimetres</option><option value="cm">Centimetres</option><option value="in">Inches</option><option value="pt">Points</option></select></label>
+                  </div>
+                  <PublishingTargetControls target={publishingSettings.headerFooter.target} pageCount={pages.length} onChange={(target) => updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, target } }))} />
+                  <PublishingStyleControls style={publishingSettings.headerFooter.style} onChange={(style) => updatePublishingSettings((settings) => ({ ...settings, headerFooter: { ...settings.headerFooter, style: { ...settings.headerFooter.style, ...style } } }))} />
+                  <button className="button ghost full-width" onClick={() => saveCurrentPublishingPreset("headerFooter")}>Save header/footer preset</button>
+                </details>
+                <details className="publishing-section">
+                  <summary>Watermark</summary>
+                  <label className="checkbox-row"><input type="checkbox" checked={publishingSettings.watermark.enabled} onChange={(event) => { const enabled = event.currentTarget.checked; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, enabled } })); }} />Enable watermark</label>
+                  <label>Type<select value={publishingSettings.watermark.type} onChange={(event) => { const type = event.currentTarget.value as "text" | "image"; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, type } })); }}><option value="text">Text</option><option value="image">Image</option></select></label>
+                  {publishingSettings.watermark.type === "text" ? (
+                    <>
+                      <label>Preset<select value={publishingSettings.watermark.preset} onChange={(event) => { const preset = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, preset, text: preset } })); }}>{publishingWatermarkPresets.map((preset) => <option key={preset} value={preset}>{preset}</option>)}</select></label>
+                      <label>Text<input value={publishingSettings.watermark.text} onChange={(event) => { const text = event.currentTarget.value; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, text } }), false); }} /></label>
+                    </>
+                  ) : (
+                    <>
+                      <label>Image asset<select value={publishingSettings.watermark.imageAssetId ?? ""} onChange={(event) => { const imageAssetId = event.currentTarget.value || undefined; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, imageAssetId } })); }}><option value="">Choose image asset</option>{marks.filter((mark) => (mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl).map((mark) => <option key={mark.id} value={mark.id}>{mark.imageName || mark.text || mark.kind}</option>)}</select></label>
+                      <button className="button ghost full-width" type="button" onClick={() => { setActiveTool("image"); imageInput.current?.click(); }}>Import image asset</button>
+                    </>
+                  )}
+                  <label>Position<select value={publishingSettings.watermark.position} onChange={(event) => { const position = event.currentTarget.value as PublishingPositionPreset; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, position } })); }}>{watermarkPositionOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+                  {publishingSettings.watermark.position === "custom" ? (
+                    <div className="page-field-grid">
+                      <label>X<input type="number" value={publishingSettings.watermark.customX} onChange={(event) => { const customX = Number(event.currentTarget.value) || 0; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, customX } })); }} /></label>
+                      <label>Y<input type="number" value={publishingSettings.watermark.customY} onChange={(event) => { const customY = Number(event.currentTarget.value) || 0; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, customY } })); }} /></label>
+                    </div>
+                  ) : null}
+                  <div className="page-field-grid">
+                    <label>Opacity<input type="number" min="0.01" max="1" step="0.05" value={publishingSettings.watermark.opacity} onChange={(event) => { const opacity = clamp(Number(event.currentTarget.value), 0.01, 1); updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, opacity } })); }} /></label>
+                    <label>Rotation<input type="number" value={publishingSettings.watermark.rotation} onChange={(event) => { const rotation = Number(event.currentTarget.value) || 0; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, rotation } })); }} /></label>
+                  </div>
+                  <label>Scale<input type="range" min="0.25" max="3" step="0.05" value={publishingSettings.watermark.scale} onChange={(event) => { const scale = Number(event.currentTarget.value); updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, scale } })); }} /></label>
+                  <div className="page-field-grid">
+                    <label>Units<select value={publishingSettings.watermark.unit} onChange={(event) => { const unit = event.currentTarget.value as PublishingUnit; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, unit } })); }}><option value="mm">Millimetres</option><option value="cm">Centimetres</option><option value="in">Inches</option><option value="pt">Points</option></select></label>
+                    <label className="checkbox-row"><input type="checkbox" checked={publishingSettings.watermark.tiled} onChange={(event) => { const tiled = event.currentTarget.checked; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, tiled } })); }} />Tile watermark</label>
+                  </div>
+                  <label className="checkbox-row"><input type="checkbox" checked={publishingSettings.watermark.maintainAspectRatio} onChange={(event) => { const maintainAspectRatio = event.currentTarget.checked; updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, maintainAspectRatio } })); }} />Maintain image aspect ratio</label>
+                  <PublishingTargetControls target={publishingSettings.watermark.target} pageCount={pages.length} onChange={(target) => updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, target } }))} />
+                  <PublishingStyleControls style={publishingSettings.watermark.style} onChange={(style) => updatePublishingSettings((settings) => ({ ...settings, watermark: { ...settings.watermark, style: { ...settings.watermark.style, ...style } } }))} />
+                  <button className="button ghost full-width" onClick={() => saveCurrentPublishingPreset("watermark")}>Save watermark preset</button>
+                </details>
+                {publishingPresets.length > 0 ? (
+                  <details className="publishing-section">
+                    <summary>Local Presets</summary>
+                    {publishingPresets.map((preset) => (
+                      <div className="preset-row" key={preset.id}>
+                        <button onClick={() => applyPublishingPreset(preset)}>{preset.name}<span>{preset.type}</span></button>
+                        <button className="link-button" onClick={() => renamePublishingPreset(preset)}>Rename</button>
+                        <button className="link-button" onClick={() => { deletePublishingPreset(preset.id); setPublishingPresets(loadPublishingPresets()); }}>Delete</button>
+                      </div>
+                    ))}
+                  </details>
+                ) : null}
                 <button className="button primary full-width" onClick={() => void exportPdf()} disabled={isBusy} title="Export edited PDF" aria-label="Export edited PDF">
                   Export PDF
                 </button>
@@ -2993,6 +3239,14 @@ export function App() {
                   penWidth={penWidth}
                   penOpacity={penOpacity}
                   pendingSignature={pendingSignature}
+                  publishingPreviewItems={getPublishingPreviewItems({
+                    settings: publishingSettings,
+                    page,
+                    pages,
+                    currentPage,
+                    selectedPageIds,
+                    tokenContext: getPublishingTokenContext(),
+                  })}
                   onSelect={setSelectedMark}
                   onAddMark={addMark}
                   onAddTextBox={addTextBox}
@@ -4081,6 +4335,7 @@ function DocumentPage({
   penWidth,
   penOpacity,
   pendingSignature,
+  publishingPreviewItems,
   onSelect,
   onAddMark,
   onAddTextBox,
@@ -4105,6 +4360,7 @@ function DocumentPage({
   penWidth: number;
   penOpacity: number;
   pendingSignature: PreparedImage | null;
+  publishingPreviewItems: ReturnType<typeof getPublishingPreviewItems>;
   onSelect: (id: string | null) => void;
   onAddMark: (page: number, x: number, y: number) => void;
   onAddTextBox: (page: number, x: number, y: number, width?: number, height?: number) => void;
@@ -4362,6 +4618,43 @@ function DocumentPage({
               {item.text}
             </span>
           ))}
+        </div>
+      ) : null}
+      {publishingPreviewItems.length > 0 ? (
+        <div className="publishing-preview-layer" aria-hidden="true">
+          {publishingPreviewItems.map((item) =>
+            item.kind === "safeArea" ? (
+              <div
+                key={item.id}
+                className="publishing-safe-area"
+                style={{
+                  left: item.x * zoom,
+                  top: item.y * zoom,
+                  width: (item.width ?? 0) * zoom,
+                  height: (item.height ?? 0) * zoom,
+                }}
+              />
+            ) : (
+              <div
+                key={item.id}
+                className={`publishing-preview-item publishing-${item.kind}`}
+                style={{
+                  left: item.x * zoom,
+                  top: item.y * zoom,
+                  color: item.style?.color,
+                  opacity: item.opacity ?? item.style?.opacity,
+                  fontSize: (item.style?.fontSize ?? 10) * zoom,
+                  fontWeight: item.style?.bold ? 800 : 600,
+                  fontStyle: item.style?.italic ? "italic" : undefined,
+                  fontFamily: getPublishingCssFontFamily(item.style?.fontFamily),
+                  textAlign: item.align,
+                  transform: `translate(${item.align === "center" ? "-50%" : item.align === "right" ? "-100%" : "0"}, -50%) rotate(${item.rotation ?? 0}deg)`,
+                }}
+              >
+                {item.text}
+              </div>
+            )
+          )}
         </div>
       ) : null}
       {draftTextSelection ? (
@@ -4803,6 +5096,135 @@ type WelcomeScreenProps = {
   onClearRecent: () => void;
   onRestoreAutosave: () => void;
 };
+
+const publishingZoneOptions: Array<{ value: PublishingZone; label: string }> = [
+  { value: "headerLeft", label: "Header left" },
+  { value: "headerCenter", label: "Header centre" },
+  { value: "headerRight", label: "Header right" },
+  { value: "footerLeft", label: "Footer left" },
+  { value: "footerCenter", label: "Footer centre" },
+  { value: "footerRight", label: "Footer right" },
+];
+
+const pageNumberFormatOptions: Array<{ value: PublishingNumberFormat; label: string }> = [
+  { value: "decimal", label: "1, 2, 3" },
+  { value: "decimal2", label: "01, 02, 03" },
+  { value: "decimal3", label: "001, 002, 003" },
+  { value: "romanLower", label: "i, ii, iii" },
+  { value: "romanUpper", label: "I, II, III" },
+  { value: "alphaLower", label: "a, b, c" },
+  { value: "alphaUpper", label: "A, B, C" },
+  { value: "page", label: "Page 1" },
+  { value: "pageOfPages", label: "Page 1 of 12" },
+  { value: "custom", label: "Custom template" },
+];
+
+const watermarkPositionOptions: Array<{ value: PublishingPositionPreset; label: string }> = [
+  { value: "center", label: "Centre" },
+  { value: "topLeft", label: "Top left" },
+  { value: "topCenter", label: "Top centre" },
+  { value: "topRight", label: "Top right" },
+  { value: "bottomLeft", label: "Bottom left" },
+  { value: "bottomCenter", label: "Bottom centre" },
+  { value: "bottomRight", label: "Bottom right" },
+  { value: "custom", label: "Custom" },
+];
+
+function PublishingTargetControls({
+  target,
+  pageCount,
+  onChange,
+}: {
+  target: PublishingSettings["pageNumbers"]["target"];
+  pageCount: number;
+  onChange: (target: PublishingSettings["pageNumbers"]["target"]) => void;
+}) {
+  const rangeError = target.mode === "custom" ? getPageRangeError(target.range, pageCount) : "";
+  return (
+    <div className="publishing-target-controls">
+      <label>
+        Pages
+        <select value={target.mode} onChange={(event) => onChange({ ...target, mode: event.currentTarget.value as PublishingTargetMode })}>
+          <option value="all">All pages</option>
+          <option value="selected">Selected pages</option>
+          <option value="current">Current page</option>
+          <option value="custom">Custom range</option>
+          <option value="odd">Odd pages</option>
+          <option value="even">Even pages</option>
+          <option value="exceptFirst">All except first page</option>
+          <option value="exceptSelected">All except selected pages</option>
+        </select>
+      </label>
+      {target.mode === "custom" ? (
+        <label>
+          Page range
+          <input value={target.range} onChange={(event) => onChange({ ...target, range: event.currentTarget.value })} placeholder="1-5, 8-10" aria-invalid={Boolean(rangeError)} />
+          {rangeError ? <span className="field-error">{rangeError}</span> : null}
+        </label>
+      ) : null}
+      <label className="checkbox-row">
+        <input type="checkbox" checked={target.excludeFirst} onChange={(event) => onChange({ ...target, excludeFirst: event.currentTarget.checked })} />
+        Exclude first page
+      </label>
+    </div>
+  );
+}
+
+function PublishingAdvancedHeaderFooterControls({
+  settings,
+  onChange,
+}: {
+  settings: PublishingSettings;
+  onChange: (key: "firstPage" | "oddPage" | "evenPage", zone: PublishingZone, value: string) => void;
+}) {
+  const groups: Array<{ key: "firstPage" | "oddPage" | "evenPage"; title: string }> = [
+    { key: "firstPage", title: "First page overrides" },
+    { key: "oddPage", title: "Odd page overrides" },
+    { key: "evenPage", title: "Even page overrides" },
+  ];
+  return (
+    <div className="publishing-advanced-groups">
+      {groups.map((group) => (
+        <details key={group.key} className="publishing-advanced-group">
+          <summary>{group.title}</summary>
+          {publishingZoneOptions.map((zone) => (
+            <label key={`${group.key}-${zone.value}`}>
+              {zone.label}
+              <input
+                value={settings.headerFooter[group.key]?.[zone.value] ?? ""}
+                onChange={(event) => onChange(group.key, zone.value, event.currentTarget.value)}
+                placeholder="Leave blank to use default"
+              />
+            </label>
+          ))}
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function PublishingStyleControls({
+  style,
+  onChange,
+}: {
+  style: PublishingSettings["pageNumbers"]["style"];
+  onChange: (style: Partial<PublishingSettings["pageNumbers"]["style"]>) => void;
+}) {
+  return (
+    <div className="publishing-style-controls">
+      <label>Font<select value={style.fontFamily} onChange={(event) => onChange({ fontFamily: event.currentTarget.value as PublishingSettings["pageNumbers"]["style"]["fontFamily"] })}><option value="Helvetica">Helvetica</option><option value="Times Roman">Times Roman</option><option value="Courier">Courier</option></select></label>
+      <div className="page-field-grid">
+        <label>Size<input type="number" min="6" max="144" value={style.fontSize} onChange={(event) => onChange({ fontSize: Number(event.currentTarget.value) || 10 })} /></label>
+        <label>Opacity<input type="number" min="0.05" max="1" step="0.05" value={style.opacity} onChange={(event) => onChange({ opacity: clamp(Number(event.currentTarget.value), 0.05, 1) })} /></label>
+      </div>
+      <label>Colour<input type="color" value={style.color} onChange={(event) => onChange({ color: event.currentTarget.value })} /></label>
+      <div className="segmented" role="group" aria-label="Font emphasis">
+        <button className={style.bold ? "active" : ""} onClick={() => onChange({ bold: !style.bold })} type="button">Bold</button>
+        <button className={style.italic ? "active" : ""} onClick={() => onChange({ italic: !style.italic })} type="button">Italic</button>
+      </div>
+    </div>
+  );
+}
 
 function WelcomeScreen({
   logoSrc,
@@ -5984,7 +6406,8 @@ function getProjectFingerprint(
   pages: PageView[],
   marks: Mark[],
   sourceDocuments: Record<string, SourceDocument>,
-  pdfName: string
+  pdfName: string,
+  publishingSettings: PublishingSettings
 ) {
   return JSON.stringify({
     projectId,
@@ -6005,12 +6428,26 @@ function getProjectFingerprint(
       textItems: page.textItems,
     })),
     marks,
+    publishingSettings,
     sources: Object.values(sourceDocuments).map((source) => ({
       id: source.id,
       name: source.name,
       size: source.bytes.byteLength,
     })),
   });
+}
+
+function getPublishingCssFontFamily(fontFamily?: string) {
+  if (fontFamily === "Times Roman") return "Times New Roman, Times, serif";
+  if (fontFamily === "Courier") return "Courier New, Courier, monospace";
+  return "Helvetica, Arial, sans-serif";
+}
+
+function validatePublishingSettings(settings: PublishingSettings) {
+  for (const target of [settings.pageNumbers.target, settings.headerFooter.target, settings.watermark.target]) {
+    if (target.mode === "custom" && !target.range.trim()) return "Enter a custom page range or choose another page target.";
+  }
+  return "";
 }
 
 function getSignaturePlacement(start: StrokePoint, current: StrokePoint, signature: PreparedImage) {
