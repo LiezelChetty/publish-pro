@@ -9,6 +9,8 @@
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "desktop:build:debug": "tauri build --debug",
+    "desktop:build:windows": "tauri build --target x86_64-pc-windows-msvc",
+    "desktop:build:windows:xwin": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc",
     "fixtures:docx": "node scripts/generate-docx-fixtures.mjs",
     "fixtures:pptx": "node scripts/generate-pptx-fixtures.mjs",
     "validate:pdf": "node scripts/validate-export.mjs",

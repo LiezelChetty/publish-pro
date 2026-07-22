@@ -20,6 +20,8 @@ npm run build
 npm run desktop:dev
 npm run desktop:build
 npm run desktop:build:debug
+npm run desktop:build:windows
+npm run desktop:build:windows:xwin
 ```
 
 `npm run dev` and `npm run build` remain the browser/Vite workflow.
@@ -27,6 +29,10 @@ npm run desktop:build:debug
 `npm run desktop:dev` starts the Tauri desktop shell and points it at the Vite dev server.
 
 `npm run desktop:build` builds the frontend and then produces Tauri bundles in `src-tauri/target/release/bundle`.
+
+`npm run desktop:build:windows` is the preferred Windows command on a Windows host and targets `x86_64-pc-windows-msvc`.
+
+`npm run desktop:build:windows:xwin` is available for last-resort NSIS cross-compilation experiments from macOS/Linux. MSI output still requires a Windows host because WiX runs on Windows.
 
 ## Application Identity
 
@@ -117,9 +123,44 @@ Configured bundle targets:
 - macOS app
 - macOS DMG
 
+Windows beta outputs on a Windows host:
+
+- Standalone executable: `src-tauri/target/x86_64-pc-windows-msvc/release/publish-pro.exe`
+- MSI installer: `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi`
+- NSIS setup executable: `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe`
+
+When building without an explicit target on Windows, Tauri may also place equivalent artifacts under `src-tauri/target/release/`.
+
+Windows prerequisites:
+
+- Windows 10/11 build host for beta validation
+- Node.js and npm
+- Rust toolchain with `x86_64-pc-windows-msvc`
+- Visual Studio Build Tools 2022 with the Desktop development with C++ workload
+- WiX Toolset v3 for `.msi` packaging
+- NSIS for setup `.exe` packaging
+- Microsoft Edge WebView2 Runtime on the target machine; Publish Pro installers use Tauri's downloaded WebView2 bootstrapper if WebView2 is missing
+- VBSCRIPT optional Windows feature enabled for MSI packaging if WiX reports `light.exe` failures
+
+Windows beta validation checklist:
+
+- Installer name, icon, publisher, copyright, and version display as Publish Pro 0.9.0 Beta
+- About dialog displays Publish Pro 0.9.0 Beta and Designovation metadata
+- `.pproj` file association opens Publish Pro
+- Native File/Edit/View/Help menus dispatch to the React app
+- Native Open, Save, Save As, and Publish PDF dialogs work
+- Drag and drop accepts `.pproj`, PDF, DOCX, PPTX, and supported image files
+- PDF upload, thumbnails, annotation tools, import, page assembly, project save/reopen, and PDF export match macOS behavior
+- Exported PDFs reopen in Publish Pro and a standard Windows PDF viewer
+- No browser-specific wording appears in the desktop runtime
+
 Final Windows installer validation must be performed on Windows.
 
 macOS signing/notarization is not configured in this phase.
+
+## GitHub Actions Readiness
+
+`.github/workflows/desktop-build.yml` defines a manual and pull-request desktop build matrix for `macos-latest` and `windows-latest`. It installs Node/Rust dependencies, runs the frontend build, runs `npm run desktop:build`, and uploads generated desktop artifacts. It does not sign, notarize, publish, or deploy releases.
 
 ## Known Limitations
 
