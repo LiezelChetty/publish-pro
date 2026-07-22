@@ -18,14 +18,32 @@ type MarkLike = {
   imageName?: string;
 };
 
+export type ProjectImageAssetLike = {
+  id: string;
+  name: string;
+  dataUrl: string;
+  mimeType?: string;
+  createdAt?: string;
+};
+
 export type ProjectAssetSummary = ProjectAssetManifest & {
   firstMarkId?: string;
   firstPageIndex?: number;
 };
 
-export function collectProjectAssets(sources: Record<string, SourceLike>, pages: PageLike[], marks: MarkLike[]): ProjectAssetSummary[] {
+export function collectProjectAssets(
+  sources: Record<string, SourceLike>,
+  pages: PageLike[],
+  marks: MarkLike[],
+  projectImageAssets: ProjectImageAssetLike[] = [],
+  referencedImageAssetIds: string[] = []
+): ProjectAssetSummary[] {
   const collectedAt = new Date().toISOString();
   const sourceUsage = new Map<string, number>();
+  const standaloneUsage = referencedImageAssetIds.reduce((usage, assetId) => {
+    usage.set(assetId, (usage.get(assetId) ?? 0) + 1);
+    return usage;
+  }, new Map<string, number>());
   pages.forEach((page) => {
     if (page.sourceDocumentId) sourceUsage.set(page.sourceDocumentId, (sourceUsage.get(page.sourceDocumentId) ?? 0) + 1);
   });
@@ -60,7 +78,23 @@ export function collectProjectAssets(sources: Record<string, SourceLike>, pages:
       firstMarkId: mark.id,
     }));
 
-  return [...sourceAssets, ...embeddedAssets];
+  const markedAssetIds = new Set(embeddedAssets.map((asset) => asset.id));
+  const standaloneAssets = projectImageAssets
+    .filter((asset) => asset.dataUrl && !markedAssetIds.has(asset.id))
+    .map((asset) => ({
+      id: asset.id,
+      name: asset.name || "Image asset",
+      type: "image" as const,
+      path: `assets/${asset.id}`,
+      mimeType: asset.mimeType,
+      size: estimateDataUrlSize(asset.dataUrl),
+      dateAdded: asset.createdAt ?? collectedAt,
+      contentHash: quickStringHash(asset.dataUrl),
+      usageCount: standaloneUsage.get(asset.id) ?? 0,
+      status: "available" as const,
+    }));
+
+  return [...sourceAssets, ...standaloneAssets, ...embeddedAssets];
 }
 
 function quickContentHash(bytes: Uint8Array) {

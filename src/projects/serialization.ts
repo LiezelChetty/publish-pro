@@ -1,4 +1,4 @@
-import { collectProjectAssets } from "./assets";
+import { collectProjectAssets, type ProjectImageAssetLike } from "./assets";
 import { createDefaultPublishingSettings } from "../publishing/defaults";
 import type { PublishingSettings } from "../publishing/types";
 import { migrateProjectManifest } from "./migrations";
@@ -18,6 +18,7 @@ type CreateProjectInput = {
   metadata: ProjectMetadata;
   pages: unknown[];
   annotations: unknown[];
+  projectImageAssets?: ProjectImageAssetLike[];
   publishingSettings?: PublishingSettings;
   sourceDocuments: Record<string, SourceLike>;
   workspaceState: ProjectManifest["workspaceState"];
@@ -34,7 +35,9 @@ export function buildProjectManifest(input: CreateProjectInput): ProjectManifest
   const allAssets = collectProjectAssets(
     input.sourceDocuments,
     input.pages as Array<{ sourceDocumentId?: string }>,
-    input.annotations as Array<{ id: string; kind: string; imageDataUrl?: string; imageMimeType?: string; imageName?: string }>
+    input.annotations as Array<{ id: string; kind: string; imageDataUrl?: string; imageMimeType?: string; imageName?: string }>,
+    input.projectImageAssets,
+    collectPublishingImageAssetIds(input.publishingSettings)
   );
 
   return {
@@ -52,6 +55,26 @@ export function buildProjectManifest(input: CreateProjectInput): ProjectManifest
   };
 }
 
+function collectPublishingImageAssetIds(settings?: PublishingSettings) {
+  const ids: string[] = [];
+  if (!settings) return ids;
+  if (settings.watermark.type === "image" && settings.watermark.imageAssetId) ids.push(settings.watermark.imageAssetId);
+  for (const area of ["header", "footer"] as const) {
+    for (const side of ["left", "center", "right"] as const) {
+      const assetId = settings.headerFooter[area][side].image?.assetId;
+      if (assetId) ids.push(assetId);
+    }
+  }
+  for (const key of ["firstPage", "oddPage", "evenPage"] as const) {
+    const override = settings.headerFooter[key];
+    if (!override) continue;
+    for (const zone of Object.values(override)) {
+      if (typeof zone === "object" && zone.image?.assetId) ids.push(zone.image.assetId);
+    }
+  }
+  return ids;
+}
+
 export function serializeProject(input: CreateProjectInput) {
   const manifest = buildProjectManifest(input);
   const files: Record<string, Uint8Array | string> = {
@@ -64,6 +87,9 @@ export function serializeProject(input: CreateProjectInput) {
     if ((mark.kind === "image" || mark.kind === "pngSignature") && mark.imageDataUrl) {
       files[`assets/${mark.id}`] = dataUrlToBytes(mark.imageDataUrl);
     }
+  }
+  for (const asset of input.projectImageAssets ?? []) {
+    files[`assets/${asset.id}`] = dataUrlToBytes(asset.dataUrl);
   }
   return createZip(files);
 }
@@ -84,6 +110,11 @@ function validateProjectAssets(manifest: ProjectManifest, files: Record<string, 
     if (seen.has(source.id)) throw new Error(`Project contains duplicate asset ID: ${source.id}`);
     seen.add(source.id);
     if (!files[source.path]) throw new Error(`Project is missing source asset: ${source.name}`);
+  }
+  for (const asset of manifest.assets) {
+    if (seen.has(asset.id)) throw new Error(`Project contains duplicate asset ID: ${asset.id}`);
+    seen.add(asset.id);
+    if (asset.status === "available" && !files[asset.path]) throw new Error(`Project is missing embedded asset: ${asset.name}`);
   }
 }
 
