@@ -25,6 +25,44 @@ export function formatPageNumber(format: PublishingNumberFormat, value: number, 
   return String(value);
 }
 
+export function formatNumberingTemplate({
+  format,
+  value,
+  documentPages,
+  numberedPages,
+  sectionPages,
+  customTemplate,
+  prefix = "",
+  suffix = "",
+}: {
+  format: PublishingNumberFormat;
+  value: number;
+  documentPages: number;
+  numberedPages: number;
+  sectionPages: number;
+  customTemplate: string;
+  prefix?: string;
+  suffix?: string;
+}) {
+  if (format === "pageOfPages") {
+    const current = `${prefix}${value}${suffix}`;
+    const total = `${prefix}${sectionPages}${suffix}`;
+    return `Page ${current} of ${total}`;
+  }
+  if (format !== "custom") {
+    return `${prefix}${formatPageNumber(format, value, sectionPages, customTemplate)}${suffix}`;
+  }
+  const template = customTemplate || "{page}";
+  const current = `${prefix}${value}${suffix}`;
+  const sectionTotal = `${prefix}${sectionPages}${suffix}`;
+  return [
+    ["{page}", current],
+    ["{pages}", String(documentPages)],
+    ["{numberedPages}", String(numberedPages)],
+    ["{sectionPages}", sectionTotal],
+  ].reduce((output, [token, replacement]) => output.split(token).join(replacement), template);
+}
+
 function toRoman(value: number) {
   const pairs: Array<[number, string]> = [
     [1000, "M"],

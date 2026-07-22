@@ -1,4 +1,4 @@
-import { PDFArray, PDFDict, PDFName, PDFNumber, PDFString, type PDFDocument, type PDFPage } from "pdf-lib";
+import { PDFArray, PDFDict, PDFHexString, PDFName, PDFNumber, type PDFDocument, type PDFPage, type PDFRef } from "pdf-lib";
 import { getBookmarkLevel } from "./bookmarks";
 import type { DocumentBookmark, TocLine } from "./types";
 
@@ -61,32 +61,48 @@ export function addPdfOutline(pdf: PDFDocument, bookmarks: DocumentBookmark[], p
     if (!ref) continue;
     const outline = context.lookup(ref, PDFDict);
     const targetPage = pages[pageIdToExportIndex.get(bookmark.pageId) ?? 0];
-    outline.set(PDFName.of("Title"), PDFString.of(bookmark.title || "Untitled"));
-    outline.set(PDFName.of("Parent"), bookmark.parentId && refs.has(bookmark.parentId) ? refs.get(bookmark.parentId)! : rootRef);
+    const parentRef = getOutlineParentRef(bookmark, refs, rootRef);
+    outline.set(PDFName.of("Title"), PDFHexString.fromText(bookmark.title || "Untitled"));
+    outline.set(PDFName.of("Parent"), parentRef);
     outline.set(PDFName.of("Dest"), context.obj([targetPage.ref, PDFName.of("XYZ"), PDFNumber.of(0), PDFNumber.of(targetPage.getHeight()), PDFNumber.of(0)]));
-    const siblings = validBookmarks.filter((item) => item.parentId === bookmark.parentId).sort((a, b) => a.order - b.order);
+    const parentId = getValidParentId(bookmark, refs);
+    const siblings = validBookmarks.filter((item) => getValidParentId(item, refs) === parentId).sort((a, b) => a.order - b.order);
     const index = siblings.findIndex((item) => item.id === bookmark.id);
     if (siblings[index - 1]) outline.set(PDFName.of("Prev"), refs.get(siblings[index - 1].id)!);
     if (siblings[index + 1]) outline.set(PDFName.of("Next"), refs.get(siblings[index + 1].id)!);
-    const children = validBookmarks.filter((item) => item.parentId === bookmark.id).sort((a, b) => a.order - b.order);
+    const children = validBookmarks.filter((item) => getValidParentId(item, refs) === bookmark.id).sort((a, b) => a.order - b.order);
     if (children.length > 0) {
       outline.set(PDFName.of("First"), refs.get(children[0].id)!);
       outline.set(PDFName.of("Last"), refs.get(children[children.length - 1].id)!);
-      outline.set(PDFName.of("Count"), PDFNumber.of(bookmark.expanded ? children.length : -children.length));
+      const descendantCount = countValidDescendants(validBookmarks, bookmark.id, refs);
+      outline.set(PDFName.of("Count"), PDFNumber.of(bookmark.expanded ? descendantCount : -descendantCount));
     }
   }
 
   for (const bookmark of validBookmarks) {
     const outline = context.lookup(refs.get(bookmark.id)!, PDFDict);
-    const parentRef = bookmark.parentId && refs.has(bookmark.parentId) ? refs.get(bookmark.parentId)! : rootRef;
-    outline.set(PDFName.of("Parent"), parentRef);
+    outline.set(PDFName.of("Parent"), getOutlineParentRef(bookmark, refs, rootRef));
   }
-  const topLevel = validBookmarks.filter((bookmark) => !bookmark.parentId || !refs.has(bookmark.parentId)).sort((a, b) => a.order - b.order);
+  const topLevel = validBookmarks.filter((bookmark) => !getValidParentId(bookmark, refs)).sort((a, b) => a.order - b.order);
   outlineRoot.set(PDFName.of("First"), refs.get(topLevel[0].id)!);
   outlineRoot.set(PDFName.of("Last"), refs.get(topLevel[topLevel.length - 1].id)!);
-  outlineRoot.set(PDFName.of("Count"), PDFNumber.of(topLevel.length));
+  outlineRoot.set(PDFName.of("Count"), PDFNumber.of(validBookmarks.length));
   pdf.catalog.set(PDFName.of("Outlines"), rootRef);
   pdf.catalog.set(PDFName.of("PageMode"), PDFName.of("UseOutlines"));
+}
+
+function getValidParentId(bookmark: DocumentBookmark, refs: Map<string, unknown>) {
+  return bookmark.parentId && refs.has(bookmark.parentId) ? bookmark.parentId : undefined;
+}
+
+function getOutlineParentRef(bookmark: DocumentBookmark, refs: Map<string, PDFRef>, rootRef: PDFRef) {
+  const parentId = getValidParentId(bookmark, refs);
+  return parentId ? refs.get(parentId)! : rootRef;
+}
+
+function countValidDescendants(bookmarks: DocumentBookmark[], bookmarkId: string, refs: Map<string, unknown>): number {
+  const children = bookmarks.filter((bookmark) => getValidParentId(bookmark, refs) === bookmarkId);
+  return children.reduce((count, child) => count + 1 + countValidDescendants(bookmarks, child.id, refs), 0);
 }
 
 function getBookmarkPath(bookmarks: DocumentBookmark[], bookmark: DocumentBookmark) {

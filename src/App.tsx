@@ -453,7 +453,7 @@ export function App() {
   );
   const currentProjectFingerprint = useMemo(
     () => getProjectFingerprint(projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings, projectImageAssets, getNavigationSnapshot()),
-    [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings, projectImageAssets, bookmarks, tocSettings, manualTocEntries, generatedToc]
+    [projectId, projectMetadata, pages, marks, sourceDocuments, pdfName, publishingSettings, projectImageAssets, bookmarks, tocSettings, manualTocEntries, generatedToc, numberingSections]
   );
   const hasUnsavedChanges = hasOpenProject && (isProjectDirty || currentProjectFingerprint !== savedProjectFingerprint);
   const visibleComments = comments.filter((mark) => {
@@ -3095,27 +3095,6 @@ export function App() {
     }
     return { tocPages, lines: layout.pages.flatMap((page) => page.lines) };
   }
-
-  useEffect(() => {
-    const isLocalValidationHost = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
-    if (!import.meta.env.DEV && !isLocalValidationHost) return;
-    const validationWindow = window as Window & {
-      __publishProExportForValidation?: () => Promise<{ bytes: number[]; pageCount: number; dimensions: { width: number; height: number }[] }>;
-    };
-    validationWindow.__publishProExportForValidation = async () => {
-      const exportedPdf = await buildPdfFromPages(pages, marks);
-      const bytes = await exportedPdf.save();
-      return {
-        bytes: Array.from(bytes),
-        pageCount: exportedPdf.getPageCount(),
-        dimensions: exportedPdf.getPages().map((page) => page.getSize()),
-      };
-    };
-
-    return () => {
-      delete validationWindow.__publishProExportForValidation;
-    };
-  }, [currentPage, marks, pages, pdfName, projectMetadata, publishingSettings, selectedPageIds, sourceDocuments]);
 
   async function exportPdf() {
     try {

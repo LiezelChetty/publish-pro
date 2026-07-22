@@ -1,4 +1,4 @@
-import { formatPageNumber } from "./tokens";
+import { formatNumberingTemplate } from "./tokens";
 import type { PublishingNumberFormat } from "./types";
 import type { NumberingSection } from "./numberingSections";
 
@@ -15,6 +15,9 @@ export type ResolvedPageNumber = {
   sectionLabel?: string;
   display: string;
   value?: number;
+  documentPages: number;
+  numberedPages: number;
+  sectionPages: number;
   included: boolean;
   includeInTotal: boolean;
 };
@@ -22,24 +25,38 @@ export type ResolvedPageNumber = {
 export function resolveNumberingSections(pages: NumberingPage[], sections: NumberingSection[], customTemplate = "{page}") {
   const sortedSections = sortNumberingSections(pages, sections);
   const pageIndex = new Map(pages.map((page, index) => [page.id, index]));
+  const sectionRanges = getNumberingSectionRanges(pages, sortedSections);
+  const sectionTotals = new Map(sectionRanges.map(({ section, start, end }) => [section.id, section.includeNumbering ? Math.max(0, end - start + 1) : 0]));
+  const numberedPages = sectionRanges.reduce((total, { section, start, end }) => {
+    if (!section.includeNumbering || !section.includeInTotal) return total;
+    return total + Math.max(0, end - start + 1);
+  }, 0);
   const results = new Map<string, ResolvedPageNumber>();
   let previousValue = 0;
-  for (const [sectionIndex, section] of sortedSections.entries()) {
-    const start = pageIndex.get(section.startPageId);
-    if (start === undefined) continue;
-    const explicitEnd = section.endPageId ? pageIndex.get(section.endPageId) : undefined;
-    const nextStart = sortedSections[sectionIndex + 1] ? pageIndex.get(sortedSections[sectionIndex + 1].startPageId) : undefined;
-    const end = explicitEnd ?? (nextStart === undefined ? pages.length - 1 : Math.max(start, nextStart - 1));
+  for (const { section, start, end } of sectionRanges) {
     let value = section.restart ? section.startValue : previousValue + 1;
     for (let index = start; index <= Math.min(end, pages.length - 1); index += 1) {
       const page = pages[index];
-      const display = section.usePageLabel && page.label ? page.label : section.includeNumbering ? `${section.prefix}${formatPageNumber(section.format, value, 0, customTemplate)}${section.suffix}` : "";
+      const sectionPages = sectionTotals.get(section.id) ?? 0;
+      const display = section.usePageLabel && page.label ? page.label : section.includeNumbering ? formatNumberingTemplate({
+        format: section.format,
+        value,
+        documentPages: pages.length,
+        numberedPages,
+        sectionPages,
+        customTemplate,
+        prefix: section.prefix,
+        suffix: section.suffix,
+      }) : "";
       results.set(page.id, {
         pageId: page.id,
         sectionId: section.id,
         sectionLabel: section.label,
         display,
         value,
+        documentPages: pages.length,
+        numberedPages,
+        sectionPages,
         included: section.includeNumbering,
         includeInTotal: section.includeInTotal,
       });
@@ -55,6 +72,9 @@ export function resolveNumberingSections(pages: NumberingPage[], sections: Numbe
         pageId: page.id,
         display: String(page.pageNumber),
         value: page.pageNumber,
+        documentPages: pages.length,
+        numberedPages: pages.length,
+        sectionPages: pages.length,
         included: true,
         includeInTotal: true,
       });
@@ -70,6 +90,18 @@ export function getResolvedPageText(page: NumberingPage, resolved: Map<string, R
 export function sortNumberingSections(pages: NumberingPage[], sections: NumberingSection[]) {
   const pageIndex = new Map(pages.map((page, index) => [page.id, index]));
   return [...sections].sort((a, b) => (pageIndex.get(a.startPageId) ?? Number.MAX_SAFE_INTEGER) - (pageIndex.get(b.startPageId) ?? Number.MAX_SAFE_INTEGER));
+}
+
+function getNumberingSectionRanges(pages: NumberingPage[], sortedSections: NumberingSection[]) {
+  const pageIndex = new Map(pages.map((page, index) => [page.id, index]));
+  return sortedSections.flatMap((section, sectionIndex) => {
+    const start = pageIndex.get(section.startPageId);
+    if (start === undefined) return [];
+    const explicitEnd = section.endPageId ? pageIndex.get(section.endPageId) : undefined;
+    const nextStart = sortedSections[sectionIndex + 1] ? pageIndex.get(sortedSections[sectionIndex + 1].startPageId) : undefined;
+    const end = explicitEnd ?? (nextStart === undefined ? pages.length - 1 : Math.max(start, nextStart - 1));
+    return [{ section, start, end: Math.min(Math.max(start, end), pages.length - 1) }];
+  });
 }
 
 export function getNumberingSummary(pages: NumberingPage[], sections: NumberingSection[], customTemplate = "{page}") {

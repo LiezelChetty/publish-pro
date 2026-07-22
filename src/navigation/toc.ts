@@ -90,8 +90,7 @@ export function layoutToc(entries: TocEntry[], pages: PageReference[], settings:
 
 export function getTocPageText(page: PageReference, settings: TocSettings, resolvedPageText = new Map<string, string>()) {
   if (settings.includePageLabels && page.label) return page.label;
-  const resolved = resolvedPageText.get(page.id);
-  if (resolved) return resolved;
+  if (resolvedPageText.has(page.id)) return resolvedPageText.get(page.id) ?? "";
   if (settings.includePageNumbers) return String(page.pageNumber);
   return "";
 }
