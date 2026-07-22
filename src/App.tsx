@@ -146,15 +146,23 @@ import {
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const THEME_STORAGE_KEY = "publish-pro-theme";
+const WORKSPACE_STORAGE_KEY = "publish-pro-active-workspace";
 
 type ShapeTool = `shape:${ShapeKind}`;
 type Tool = "select" | "text" | "highlight" | "signature" | "stamp" | "image" | "draw" | "pngSignature" | "comment" | ShapeTool | TextMarkupKind;
 type MarkKind = "text" | "highlight" | "signature" | "stamp" | "image" | "stroke" | "pngSignature" | "comment" | "shape" | TextMarkupKind;
 type LeftPanel = "pages" | "insert" | "bookmarks" | "comments" | "search";
-type WorkspaceMode = "organise" | "edit" | "annotate" | "review" | "assemble" | "publish";
+type WorkspaceMode = "import" | "assemble" | "review" | "publish";
 type WorkState = {
   message: string;
   progress?: number;
+};
+type ToastTone = "success" | "info" | "warning" | "error" | "progress";
+type ToastMessage = {
+  id: string;
+  tone: ToastTone;
+  title: string;
+  detail?: string;
 };
 
 type StrokePoint = {
@@ -416,9 +424,11 @@ export function App() {
   const [zoom, setZoom] = useState(1);
   const [query, setQuery] = useState("");
   const [leftPanel, setLeftPanel] = useState<LeftPanel>("pages");
-  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceMode>("organise");
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceMode>(() => getStoredWorkspaceMode());
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
+  const [isShortcutDialogOpen, setIsShortcutDialogOpen] = useState(false);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [selectedPageIds, setSelectedPageIds] = useState<string[]>([demoPages[0].id]);
   const [lastSelectedPageId, setLastSelectedPageId] = useState<string | null>(demoPages[0].id);
   const [copiedPages, setCopiedPages] = useState<{ pages: PageView[]; marks: Mark[] } | null>(null);
@@ -554,6 +564,17 @@ export function App() {
   const isBusy = workState !== null;
   const canUndo = (history.past.length > 0 || publishingHistory.past.length > 0 || navigationHistory.past.length > 0) && !isBusy;
   const canRedo = (history.future.length > 0 || publishingHistory.future.length > 0 || navigationHistory.future.length > 0) && !isBusy;
+  const saveStatus = workState
+    ? workState.message
+    : hasUnsavedChanges
+      ? "Unsaved"
+      : lastSavedAt
+        ? "Saved"
+        : lastAutosavedAt
+          ? "Autosaved"
+          : hasOpenProject
+            ? "Draft"
+            : "Welcome";
   const filteredPages = useMemo(() => {
     if (!query.trim()) return pages;
     const normalized = query.trim().toLowerCase();
@@ -575,25 +596,33 @@ export function App() {
     () => validateNavigation({ bookmarks, manualEntries: manualTocEntries, pages: pageReferences, generatedToc }),
     [bookmarks, manualTocEntries, pageReferences, generatedToc]
   );
-  const workspaceItems: Array<{ id: WorkspaceMode; icon: ReactElement; title: string; description: string }> = [
-    { id: "organise", icon: <FilePlus2 />, title: "Organise", description: "Pages and order" },
-    { id: "edit", icon: <TextCursorInput />, title: "Edit", description: "Text, images, signatures" },
-    { id: "annotate", icon: <Pencil />, title: "Annotate", description: "Markup and shapes" },
-    { id: "review", icon: <MessageSquare />, title: "Review", description: "Comments and replies" },
-    { id: "assemble", icon: <Files />, title: "Assemble", description: "Files and structure" },
-    { id: "publish", icon: <Download />, title: "Publish", description: "Export output" },
+  const workspaceItems: Array<{ id: WorkspaceMode; icon: ReactElement; title: string; description: string; shortcut: string }> = [
+    { id: "import", icon: <FilePlus2 />, title: "Import", description: "Sources and reports", shortcut: "1" },
+    { id: "assemble", icon: <Files />, title: "Assemble", description: "Pages and assets", shortcut: "2" },
+    { id: "review", icon: <MessageSquare />, title: "Review", description: "Edits, markup, comments", shortcut: "3" },
+    { id: "publish", icon: <Download />, title: "Publish", description: "Marks and export", shortcut: "4" },
   ];
   const activeWorkspaceItem = workspaceItems.find((workspace) => workspace.id === activeWorkspace) ?? workspaceItems[0];
-  const canShowObjectInspector = activeWorkspace === "edit" || activeWorkspace === "annotate";
+  const canShowObjectInspector = activeWorkspace === "review";
 
   function selectWorkspace(workspace: WorkspaceMode) {
     setActiveWorkspace(workspace);
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, workspace);
     setIsLeftPanelCollapsed(false);
-    if (workspace === "organise") setLeftPanel("pages");
+    if (workspace === "import") setLeftPanel("insert");
+    if (workspace === "assemble") setLeftPanel("pages");
     if (workspace === "review") setLeftPanel("comments");
-    if (workspace === "assemble" || workspace === "edit") setLeftPanel("insert");
     if (workspace === "publish") setLeftPanel("insert");
-    if (workspace === "annotate") setLeftPanel("comments");
+  }
+
+  function pushToast(toast: Omit<ToastMessage, "id">) {
+    const id = crypto.randomUUID();
+    setToasts((existing) => [...existing.filter((item) => item.title !== toast.title || item.detail !== toast.detail).slice(-3), { ...toast, id }]);
+    if (toast.tone === "success" || toast.tone === "info") {
+      window.setTimeout(() => {
+        setToasts((existing) => existing.filter((item) => item.id !== id));
+      }, 4200);
+    }
   }
 
   function changeThemeMode(mode: ThemeMode) {
@@ -717,7 +746,7 @@ export function App() {
     setSelectedPageIds([blankPage.id]);
     setLastSelectedPageId(blankPage.id);
     setCurrentPage(1);
-    setActiveWorkspace("organise");
+    setActiveWorkspace("assemble");
     setIsProjectDirty(true);
     setIsProjectDialogOpen(false);
     setProjectStatusMessage("New project created. Autosave will keep a local recovery copy.");
@@ -794,7 +823,7 @@ export function App() {
     setSelectedMark(null);
     setCurrentPage(Math.min(Math.max(1, bundle.manifest.workspaceState.currentPage || 1), Math.max(1, nextPages.length)));
     setZoom(bundle.manifest.workspaceState.zoom || 1);
-    setActiveWorkspace((bundle.manifest.workspaceState.activeWorkspace as WorkspaceMode) || "organise");
+    setActiveWorkspace(normalizeWorkspaceMode(bundle.manifest.workspaceState.activeWorkspace));
     setLeftPanel((bundle.manifest.workspaceState.leftPanel as LeftPanel) || "pages");
     const selectedIds = bundle.manifest.workspaceState.selectedPageIds.filter((id) => nextPages.some((page) => page.id === id));
     setSelectedPageIds(selectedIds.length > 0 ? selectedIds : nextPages[0] ? [nextPages[0].id] : []);
@@ -996,14 +1025,14 @@ export function App() {
       setCurrentPage(sourcePage.pageNumber);
       setSelectedPageIds([sourcePage.id]);
       setLastSelectedPageId(sourcePage.id);
-      setActiveWorkspace("organise");
+      setActiveWorkspace("assemble");
       return;
     }
     const mark = marks.find((item) => item.id === assetId);
     if (mark) {
       setCurrentPage(mark.page);
       setSelectedMark(mark.id);
-      setActiveWorkspace(mark.kind === "comment" ? "review" : "edit");
+      setActiveWorkspace("review");
       return;
     }
     if (projectImageAssets.some((asset) => asset.id === assetId)) {
@@ -1106,6 +1135,16 @@ export function App() {
     return () => window.clearTimeout(timeout);
   }, [hasOpenProject, projectId, projectMetadata, pages, marks, sourceDocuments, currentPage, zoom, activeWorkspace, leftPanel, selectedPageIds, pdfName]);
 
+  useEffect(() => {
+    if (!projectStatusMessage) return;
+    pushToast({ tone: projectStatusMessage.toLowerCase().includes("failed") ? "warning" : "info", title: projectStatusMessage });
+  }, [projectStatusMessage]);
+
+  useEffect(() => {
+    if (!errorMessage) return;
+    pushToast({ tone: "error", title: "Action failed", detail: errorMessage });
+  }, [errorMessage]);
+
   function getPageByNumber(pageNumber: number) {
     return pages.find((page) => page.pageNumber === pageNumber) ?? pages[0];
   }
@@ -1147,10 +1186,55 @@ export function App() {
   useEffect(() => {
     function handleKeyboardShortcut(event: KeyboardEvent) {
       const isModifierPressed = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      if (!isModifierPressed && key === "?" && !isEditableElement(event.target)) {
+        event.preventDefault();
+        setIsShortcutDialogOpen(true);
+        return;
+      }
       if (!isModifierPressed || isBusy) return;
 
-      const key = event.key.toLowerCase();
       if (isEditableElement(event.target) && (key === "z" || key === "y" || key === "c" || key === "v")) return;
+      if (!isEditableElement(event.target) && ["1", "2", "3", "4"].includes(key)) {
+        event.preventDefault();
+        selectWorkspace(key === "1" ? "import" : key === "2" ? "assemble" : key === "3" ? "review" : "publish");
+        return;
+      }
+      if (!isEditableElement(event.target) && key === "n") {
+        event.preventDefault();
+        startNewProject();
+        return;
+      }
+      if (!isEditableElement(event.target) && key === "o") {
+        event.preventDefault();
+        projectInput.current?.click();
+        return;
+      }
+      if (!isEditableElement(event.target) && key === "s") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          saveProjectAs();
+        } else if (hasOpenProject) {
+          void saveProject();
+        }
+        return;
+      }
+      if (!isEditableElement(event.target) && key === "f") {
+        event.preventDefault();
+        setLeftPanel("search");
+        setIsLeftPanelCollapsed(false);
+        return;
+      }
+      if (!isEditableElement(event.target) && key === "k") {
+        event.preventDefault();
+        setIsShortcutDialogOpen(true);
+        return;
+      }
+      if (!isEditableElement(event.target) && key === "p" && event.shiftKey) {
+        event.preventDefault();
+        selectWorkspace("publish");
+        return;
+      }
       const isUndo = key === "z" && !event.shiftKey;
       const isRedo = (key === "z" && event.shiftKey) || key === "y";
       const isCopy = key === "c" && !event.shiftKey && !isEditableElement(event.target);
@@ -1188,7 +1272,7 @@ export function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyboardShortcut);
     };
-  }, [history, isBusy, selected, copiedMark, currentPage, marks, pages]);
+  }, [history, isBusy, selected, copiedMark, currentPage, marks, pages, hasOpenProject, hasUnsavedChanges]);
 
   useEffect(() => {
     function handleDeleteShortcut(event: KeyboardEvent) {
@@ -3537,6 +3621,7 @@ export function App() {
       <AppChrome
         logoSrc={BRAND_ICON_SRC}
         documentName={pdfName}
+        saveStatus={saveStatus}
         isBusy={isBusy}
         hasUnsavedChanges={hasUnsavedChanges}
         themeMode={themeMode}
@@ -3548,9 +3633,14 @@ export function App() {
         onImportDocx={() => docxInput.current?.click()}
         onImportPptx={() => pptxInput.current?.click()}
         canSaveProject={hasOpenProject}
+        canUndo={canUndo}
+        canRedo={canRedo}
         onSaveProject={saveProject}
         onSaveProjectAs={saveProjectAs}
         onCloseProject={closeProject}
+        onUndo={undo}
+        onRedo={redo}
+        onShowShortcuts={() => setIsShortcutDialogOpen(true)}
         onExport={() => void exportPdf()}
       />
       <input className="hidden-file-input" ref={projectInput} type="file" accept=".pproj,application/zip" onChange={handleProjectUpload} aria-label="Choose Publish Pro project file" />
@@ -3819,19 +3909,23 @@ export function App() {
         </div>
       ) : null}
 
+      {isShortcutDialogOpen ? (
+        <ShortcutReferenceDialog
+          onClose={() => setIsShortcutDialogOpen(false)}
+          isMac={navigator.platform.toLowerCase().includes("mac")}
+        />
+      ) : null}
+
       <nav className="main-toolbar" aria-label={`${activeWorkspaceItem.title} workspace tools`}>
         <div className="toolbar-context">
           <span>{activeWorkspaceItem.title}</span>
           <strong>{activeWorkspaceItem.description}</strong>
         </div>
-        {activeWorkspace === "organise" ? (
+        {activeWorkspace === "assemble" ? (
           <>
             <div className="toolbar-group" aria-label="Page actions">
               <ToolButton icon={<FilePlus2 />} label="Insert blank pages" onClick={() => setActivePageDialog("blank")} disabled={isBusy} />
               <ToolButton icon={<Files />} label="Combine files" onClick={() => setActivePageDialog("merge")} disabled={isBusy} />
-              <ToolButton icon={<Plus />} label="Duplicate selected pages" onClick={duplicatePage} disabled={isBusy} />
-              <ToolButton icon={<CornerUpRight />} label="Rotate selected pages clockwise" onClick={() => void rotateSelectedPages(90)} disabled={isBusy} />
-              <ToolButton icon={<Trash2 />} label="Delete selected pages" onClick={deleteSelectedPages} disabled={isBusy || pages.length === 0} />
             </div>
             <ToolbarMenu icon={<MoreHorizontal />} label="More page actions">
               <MenuToolButton icon={<PanelLeftOpen />} label="Select all pages" onClick={selectAllPages} disabled={isBusy} />
@@ -3844,7 +3938,7 @@ export function App() {
             </ToolbarMenu>
           </>
         ) : null}
-        {activeWorkspace === "edit" ? (
+        {activeWorkspace === "review" ? (
           <>
             <div className="toolbar-group" aria-label="Navigation and edit tools">
               <ToolButton icon={<MousePointer2 />} label="Select tool" active={activeTool === "select"} onClick={() => setActiveTool("select")} disabled={isBusy} />
@@ -3862,7 +3956,7 @@ export function App() {
             </div>
           </>
         ) : null}
-        {activeWorkspace === "annotate" ? (
+        {activeWorkspace === "review" ? (
           <>
             <div className="toolbar-group" aria-label="Text markup tools">
               <ToolButton icon={<Highlighter />} label="Highlight selected text" active={activeTool === "textHighlight"} onClick={() => setActiveTool("textHighlight")} disabled={isBusy} />
@@ -3893,7 +3987,7 @@ export function App() {
             <ToolButton icon={<Stamp />} label="Add approval stamp" active={activeTool === "stamp"} onClick={() => setActiveTool("stamp")} disabled={isBusy} />
           </div>
         ) : null}
-        {activeWorkspace === "assemble" ? (
+        {activeWorkspace === "import" ? (
           <div className="toolbar-group" aria-label="Assembly tools">
             <ToolButton icon={<Files />} label="Open PDF" onClick={() => fileInput.current?.click()} disabled={isBusy} />
             <ToolButton icon={<Plus />} label="Import PDFs" onClick={() => importPdfInput.current?.click()} disabled={isBusy} />
@@ -3946,7 +4040,7 @@ export function App() {
               </button>
             </div>
 
-            {activeWorkspace === "organise" ? (
+            {activeWorkspace === "assemble" ? (
               <>
                 <div className="searchbox">
                   <Search size={15} />
@@ -4032,7 +4126,7 @@ export function App() {
               </>
             ) : null}
 
-            {activeWorkspace === "edit" ? (
+            {activeWorkspace === "review" ? (
               <div className="workspace-panel-content">
                 <ToolCard icon={<MousePointer2 />} title="Select and move" description="Choose, move, resize, duplicate, or delete existing objects." onClick={() => setActiveTool("select")} />
                 <ToolCard icon={<TextCursorInput />} title="Text" description="Place editable overlay text boxes on the page." onClick={() => setActiveTool("text")} />
@@ -4041,7 +4135,7 @@ export function App() {
               </div>
             ) : null}
 
-            {activeWorkspace === "annotate" ? (
+            {activeWorkspace === "review" ? (
               <div className="workspace-panel-content">
                 <ToolCard icon={<Highlighter />} title="Text markup" description="Highlight, underline, or strike selected PDF text." onClick={() => setActiveTool("textHighlight")} />
                 <ToolCard icon={<Pencil />} title="Draw" description="Use freehand strokes for notes, sketches, and signatures." onClick={() => setActiveTool("draw")} />
@@ -4050,7 +4144,7 @@ export function App() {
               </div>
             ) : null}
 
-            {activeWorkspace === "assemble" ? (
+            {activeWorkspace === "import" ? (
               <div className="workspace-panel-content">
                 <div className="project-quick-actions">
                   <button className="button ghost" onClick={startNewProject} disabled={isBusy}>New</button>
@@ -4063,6 +4157,20 @@ export function App() {
                 <ToolCard icon={<Plus />} title="Import PDFs" description="Append or insert PDF pages into this publication." onClick={() => importPdfInput.current?.click()} />
                 <ToolCard icon={<ImageIcon />} title="Add image asset" description="Import image artwork for publishing marks without placing it on a page." onClick={() => startProjectImageAssetImport({ kind: "projectAssets" })} />
                 <ToolCard icon={<PenLine />} title="Add signature asset" description="Add a local transparent PNG signature." onClick={() => { setActiveTool("pngSignature"); signatureInput.current?.click(); }} />
+                <ImportSourceManager
+                  sourceDocuments={sourceDocuments}
+                  pages={pages}
+                  docxImportGroups={docxImportGroups}
+                  pptxImportGroups={pptxImportGroups}
+                  isBusy={isBusy}
+                  onReviewPage={(page) => {
+                    setCurrentPage(page.pageNumber);
+                    setSelectedPageIds([page.id]);
+                    selectWorkspace("assemble");
+                  }}
+                  onReimportDocx={beginDocxReimport}
+                  onReimportPptx={beginPptxReimport}
+                />
                 <details className="publishing-section" open>
                   <summary>Bookmarks</summary>
                   <div className="project-quick-actions">
@@ -4484,16 +4592,16 @@ export function App() {
           <div className="inspector-header">
             <div>
               <h2>{getWorkspaceInspectorTitle(activeWorkspace)}</h2>
-              <span>{(canShowObjectInspector || (activeWorkspace === "review" && selected?.kind === "comment")) && selected ? getMarkLabel(selected) : getWorkspaceInspectorSubtitle(activeWorkspace)}</span>
+              <span>{canShowObjectInspector && selected ? getMarkLabel(selected) : getWorkspaceInspectorSubtitle(activeWorkspace)}</span>
             </div>
             <button className="panel-icon-button" onClick={() => setIsRightPanelCollapsed(true)} title="Collapse right panel" aria-label="Collapse right panel">
               <PanelRightClose size={16} />
             </button>
           </div>
           <details className="inspector-section" open>
-            <summary>{(canShowObjectInspector || (activeWorkspace === "review" && selected?.kind === "comment")) && selected ? "Selection" : getWorkspaceInspectorTitle(activeWorkspace)}</summary>
+            <summary>{canShowObjectInspector && selected ? "Selection" : getWorkspaceInspectorTitle(activeWorkspace)}</summary>
             <div className="inspector-section-body">
-          {activeWorkspace === "organise" ? (
+          {activeWorkspace === "assemble" ? (
             <div className="control-stack workspace-properties">
               <div className="property-readout">
                 <span>Current page</span>
@@ -4533,7 +4641,7 @@ export function App() {
               </label>
             </div>
           ) : null}
-          {activeWorkspace === "assemble" ? (
+          {activeWorkspace === "import" ? (
             <div className="control-stack workspace-properties">
               <div className="property-readout">
                 <span>Project</span>
@@ -4652,7 +4760,7 @@ export function App() {
               </button>
             </div>
           ) : null}
-          {activeWorkspace === "annotate" && activeTool === "draw" ? (
+          {activeWorkspace === "review" && activeTool === "draw" ? (
             <div className="control-stack pen-controls">
               <label>
                 Stroke colour
@@ -4842,7 +4950,7 @@ export function App() {
                 Delete comment
               </button>
             </div>
-          ) : activeWorkspace === "edit" && selected?.kind === "text" ? (
+          ) : activeWorkspace === "review" && selected?.kind === "text" ? (
             <div className="control-stack text-box-controls">
               <button className="button ghost full-width" onClick={() => startTextEdit(selected)} title="Edit text box content" aria-label="Edit text box content">
                 Edit text
@@ -5077,7 +5185,7 @@ export function App() {
                 </button>
               </div>
             </div>
-          ) : activeWorkspace === "annotate" && selected?.kind === "shape" && selected.shapeStyle ? (
+          ) : activeWorkspace === "review" && selected?.kind === "shape" && selected.shapeStyle ? (
             <div className="control-stack shape-controls">
               <div className="comment-status">
                 <Square size={16} aria-hidden="true" />
@@ -5465,7 +5573,7 @@ export function App() {
                 </div>
               ) : null}
             </div>
-          ) : activeWorkspace === "organise" || activeWorkspace === "assemble" || activeWorkspace === "publish" ? null : (
+          ) : activeWorkspace === "import" || activeWorkspace === "assemble" || activeWorkspace === "publish" ? null : (
             <div className="empty-panel">
               {activeWorkspaceItem.icon}
               <p>{getWorkspaceEmptyInspectorMessage(activeWorkspace)}</p>
@@ -5575,10 +5683,146 @@ export function App() {
           </button>
         </div>
         <div className="statusbar-meta">
-          {workState?.message ?? `${marks.length} edits`}
+          {saveStatus} | {activeWorkspaceItem.title} | {marks.length} edits | {comments.length} comments | {navigationIssues.length + numberingIssues.length} warnings
         </div>
       </footer>
+      <ToastLayer toasts={toasts} onDismiss={(id) => setToasts((existing) => existing.filter((toast) => toast.id !== id))} />
     </main>
+  );
+}
+
+function ImportSourceManager({
+  sourceDocuments,
+  pages,
+  docxImportGroups,
+  pptxImportGroups,
+  isBusy,
+  onReviewPage,
+  onReimportDocx,
+  onReimportPptx,
+}: {
+  sourceDocuments: Record<string, SourceDocument>;
+  pages: PageView[];
+  docxImportGroups: Array<{ metadata: DocxImportMetadata; pages: PageView[]; warnings: number; mappings: number }>;
+  pptxImportGroups: Array<{ metadata: PptxImportMetadata; pages: PageView[]; warnings: number; mappings: number; notes: number }>;
+  isBusy: boolean;
+  onReviewPage: (page: PageView) => void;
+  onReimportDocx: (metadata: DocxImportMetadata) => void;
+  onReimportPptx: (metadata: PptxImportMetadata) => void;
+}) {
+  const pdfSources = Object.values(sourceDocuments).filter((source) => (source.mimeType ?? "application/pdf") === "application/pdf");
+  const sourceCount = pdfSources.length + docxImportGroups.length + pptxImportGroups.length;
+  return (
+    <section className="source-manager" aria-label="Import source manager">
+      <div className="section-heading">
+        <strong>Sources</strong>
+        <span>{sourceCount} connected</span>
+      </div>
+      {sourceCount === 0 ? (
+        <p className="muted-text">No external sources imported yet.</p>
+      ) : null}
+      {pdfSources.map((source) => {
+        const contributedPages = pages.filter((page) => page.sourceDocumentId === source.id);
+        return (
+          <div className="source-row" key={source.id}>
+            <span className="asset-type">PDF</span>
+            <strong>{source.name}</strong>
+            <small>{contributedPages.length} pages · {formatAssetSize(source.bytes.byteLength)}</small>
+            <div className="asset-actions">
+              <button onClick={() => contributedPages[0] && onReviewPage(contributedPages[0])} disabled={!contributedPages[0]}>View pages</button>
+            </div>
+          </div>
+        );
+      })}
+      {docxImportGroups.map((group) => (
+        <div className="source-row" key={group.metadata.importId}>
+          <span className="asset-type">DOCX</span>
+          <strong>{group.metadata.sourceName}</strong>
+          <small>{group.pages.length} pages · {group.metadata.fidelityMode} · {group.warnings} warnings</small>
+          <div className="asset-actions">
+            <button onClick={() => group.pages[0] && onReviewPage(group.pages[0])} disabled={!group.pages[0]}>View</button>
+            <button onClick={() => onReimportDocx(group.metadata)} disabled={isBusy || !group.metadata.originalSourceDocumentId}>Re-import</button>
+          </div>
+        </div>
+      ))}
+      {pptxImportGroups.map((group) => (
+        <div className="source-row" key={group.metadata.importId}>
+          <span className="asset-type">PPTX</span>
+          <strong>{group.metadata.sourceName}</strong>
+          <small>{group.pages.length} slides · {group.metadata.fidelityMode} · {group.notes} notes · {group.warnings} warnings</small>
+          <div className="asset-actions">
+            <button onClick={() => group.pages[0] && onReviewPage(group.pages[0])} disabled={!group.pages[0]}>View</button>
+            <button onClick={() => onReimportPptx(group.metadata)} disabled={isBusy || !group.metadata.originalSourceDocumentId}>Re-import</button>
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function ToastLayer({ toasts, onDismiss }: { toasts: ToastMessage[]; onDismiss: (id: string) => void }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-layer" role="region" aria-label="Notifications">
+      {toasts.map((toast) => (
+        <div className={`toast toast-${toast.tone}`} key={toast.id} role={toast.tone === "error" ? "alert" : "status"} aria-live={toast.tone === "error" ? "assertive" : "polite"}>
+          <span className="toast-indicator" aria-hidden="true" />
+          <span className="toast-content">
+            <strong>{toast.title}</strong>
+            {toast.detail ? <small>{toast.detail}</small> : null}
+          </span>
+          <button type="button" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification" title="Dismiss notification">x</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ShortcutReferenceDialog({ isMac, onClose }: { isMac: boolean; onClose: () => void }) {
+  const mod = isMac ? "Cmd" : "Ctrl";
+  const shortcuts = [
+    [`${mod}+1`, "Import workspace"],
+    [`${mod}+2`, "Assemble workspace"],
+    [`${mod}+3`, "Review workspace"],
+    [`${mod}+4`, "Publish workspace"],
+    [`${mod}+N`, "New project"],
+    [`${mod}+O`, "Open project"],
+    [`${mod}+S`, "Save project"],
+    [`${mod}+Shift+S`, "Save project as"],
+    [`${mod}+Z`, "Undo"],
+    [`${mod}+Shift+Z`, "Redo"],
+    [`${isMac ? "Cmd" : "Ctrl"}+Y`, "Redo"],
+    [`${mod}+F`, "Search"],
+    [`${mod}+Shift+P`, "Open Publish workflow"],
+    ["Delete / Backspace", "Delete selected object"],
+    ["Escape", "Cancel tool or clear selection"],
+    ["?", "Show shortcuts"],
+  ];
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="modal-card shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-reference-title">
+        <div className="modal-header">
+          <h2 id="shortcut-reference-title">Keyboard Shortcuts</h2>
+          <button className="panel-icon-button" onClick={onClose} aria-label="Close shortcut reference" title="Close dialog">x</button>
+        </div>
+        <div className="dialog-body">
+          <p className="dialog-note">Shortcuts are disabled while typing in text fields.</p>
+          <div className="shortcut-grid">
+            {shortcuts.map(([keys, action]) => (
+              <div className="shortcut-row" key={`${keys}-${action}`}>
+                <kbd>{keys}</kbd>
+                <span>{action}</span>
+              </div>
+            ))}
+          </div>
+          <div className="dialog-actions">
+            <button className="button primary" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -7302,47 +7546,38 @@ function getLeftPanelTitle(panel: LeftPanel) {
 }
 
 function getWorkspacePanelTitle(workspace: WorkspaceMode) {
-  if (workspace === "organise") return "Pages";
-  if (workspace === "edit") return "Edit tools";
-  if (workspace === "annotate") return "Markup tools";
+  if (workspace === "import") return "Import";
+  if (workspace === "assemble") return "Pages";
   if (workspace === "review") return "Comments";
-  if (workspace === "assemble") return "Project assets";
   return "Publish";
 }
 
 function getWorkspacePanelSubtitle(workspace: WorkspaceMode, pageCount: number, selectedPageCount: number, pdfName: string, commentCount: number) {
-  if (workspace === "organise") return `${pageCount} pages${selectedPageCount > 1 ? ` - ${selectedPageCount} selected` : ""}`;
+  if (workspace === "import") return pdfName;
+  if (workspace === "assemble") return `${pageCount} pages${selectedPageCount > 1 ? ` - ${selectedPageCount} selected` : ""}`;
   if (workspace === "review") return `${commentCount} comments`;
   if (workspace === "publish") return "Export and output";
-  if (workspace === "assemble") return pdfName;
-  if (workspace === "annotate") return "Markup, notes, and shapes";
   return "Objects and placement";
 }
 
 function getWorkspaceInspectorTitle(workspace: WorkspaceMode) {
-  if (workspace === "organise") return "Page properties";
-  if (workspace === "edit") return "Object properties";
-  if (workspace === "annotate") return "Annotation style";
-  if (workspace === "review") return "Comment details";
-  if (workspace === "assemble") return "Project settings";
+  if (workspace === "import") return "Project overview";
+  if (workspace === "assemble") return "Page properties";
+  if (workspace === "review") return "Object properties";
   return "Export settings";
 }
 
 function getWorkspaceInspectorSubtitle(workspace: WorkspaceMode) {
-  if (workspace === "organise") return "Page information, rotation, and labels";
-  if (workspace === "edit") return "Select an object to edit position and appearance";
-  if (workspace === "annotate") return "Choose markup to adjust stroke, fill, and opacity";
-  if (workspace === "review") return "Select a comment to view its thread";
-  if (workspace === "assemble") return "Import and organise document assets";
+  if (workspace === "import") return "Sources, assets, and project state";
+  if (workspace === "assemble") return "Page information, rotation, and labels";
+  if (workspace === "review") return "Select an object, comment, or bookmark";
   return "Ready to export the current document";
 }
 
 function getWorkspaceEmptyInspectorMessage(workspace: WorkspaceMode) {
-  if (workspace === "organise") return "Select a page thumbnail to inspect page information, rotation, and labels.";
-  if (workspace === "edit") return "Select an object or choose an edit tool to adjust placement, size, and appearance.";
-  if (workspace === "annotate") return "Select markup or choose an annotation tool to adjust styling.";
-  if (workspace === "review") return "Select a comment to review replies, status, and marker colour.";
-  if (workspace === "assemble") return "Import PDFs or use the project asset actions to build this publication.";
+  if (workspace === "import") return "Import PDFs, Word documents, or PowerPoint presentations into this project.";
+  if (workspace === "assemble") return "Select a page thumbnail to inspect page information, rotation, and labels.";
+  if (workspace === "review") return "Select an object, comment, or bookmark to inspect.";
   return "Ready to export. Choose export from the toolbar or Publish panel.";
 }
 
@@ -7350,6 +7585,18 @@ function getStoredThemeMode(): ThemeMode {
   if (typeof window === "undefined") return "system";
   const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
   return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+}
+
+function normalizeWorkspaceMode(value: unknown): WorkspaceMode {
+  if (value === "import" || value === "assemble" || value === "review" || value === "publish") return value;
+  if (value === "organise") return "assemble";
+  if (value === "edit" || value === "annotate") return "review";
+  return "import";
+}
+
+function getStoredWorkspaceMode(): WorkspaceMode {
+  if (typeof window === "undefined") return "import";
+  return normalizeWorkspaceMode(window.localStorage.getItem(WORKSPACE_STORAGE_KEY));
 }
 
 function resolveThemeMode(mode: ThemeMode): "light" | "dark" {
